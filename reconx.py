@@ -138,56 +138,67 @@ def clear():
             sys.stdout.flush()
 
 # ================= BANNER + SKULL =================
+# ================= BANNER + SKULL =================
 SKULL_FRAMES = [
 r"""
-     .-.
-    (o o)
-     |O|
+       .---.
+      /     \
+     | () () |
+      \  ^  /
+       '---'
+      /|   |\
+     / |   | \
 """,
 r"""
-    _____
-   /     \
-  | () () |
-   \  ^  /
-    |||||
+      .---.
+     /     \
+    | (o o) |
+     \  ^  /
+      '---'
+     /|   |\
+    / |   | \
 """,
 r"""
-   .-""-.
-  /  .-.  \
- |  (o o)  |
-  \  \^/  /
-   '.____.'
+       .---.
+      /     \
+     | (O O) |
+      \  ^  /
+       '---'
+      /|   |\
+     / |   | \
 """,
 r"""
-    ,--.
-   / _.-'
-   \  '-.
-    '--'
-   /|##|\
-   \|##|/
+        .---.
+       /     \
+      | (o.o) |
+       \  ^  /
+        '---'
+       /|   |\
+      / |   | \
 """,
 r"""
-        .--.
-       /.-. '----------.
-       \'-' .--""--"-'
-        '--'
+         .---.
+        /     \
+       | (O.O) |
+        \  ^  /
+         '---'
+        /|   |\
+       / |   | \
 """,
 ]
 
 BANNER = r"""
-  █████████                                                                               █████    
- ███░░░░░███                                                                             ░░███     
-░███    ░░░   ██████   ██████   ████████    ██████  ████████     █████ ███ █████  ██████  ░███████ 
-░░█████████  ███░░███ ░░░░░███ ░░███░░███  ███░░███░░███░░███   ░░███ ░███░░███  ███░░███ ░███░░███
- ░░░░░░░░███░███ ░░░   ███████  ░███ ░███ ░███████  ░███ ░░░     ░███ ░███ ░███ ░███████  ░███ ░███
- ███    ░███░███  ███ ███░░███  ░███ ░███ ░███░░░   ░███         ░░███████████  ░███░░░   ░███ ░███
-░░█████████ ░░██████ ░░████████ ████ █████░░██████  █████         ░░████░████   ░░██████  ████████ 
- ░░░░░░░░░   ░░░░░░   ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░  ░░░░░           ░░░░ ░░░░     ░░░░░░  ░░░░░░░░  
-                                                                                                   
-                                                                                                   
-                                                                                                                                                                       ░                              
-"""
+  ____                           _    __  __
+ |  _ \ ___  ___  _ __   ___  __| |  |  \/  | __ _ _ __
+ | |_) / _ \/ __|| '_ \ / _ \/ _` |  | |\/| |/ _` | '_ \
+ |  _ <  __/\__ \| | | |  __/ (_| |  | |  | | (_| | | | |
+ |_| \_\___||___/|_| |_|\___|\__,_|  |_|  |_|\__,_|_| |_|
 
+      Professional Web Reconnaissance Framework  v4.0
+      Windows | Linux | Termux | Pydroid3 | Stealth Ready
+
+  Real scans only. No fake data. No placeholders.
+"""
 def boot_animation():
     clear()
     for _ in range(2):
@@ -1943,7 +1954,7 @@ def scan_mixed_content(resp):
     body = resp.get("body") or ""
     if not body:
         return []
-    pattern = re.compile(r'''(?:src|href|action|data-src|poster)\s*=\s*["']?(http://[^"'\s>]+)''', re.I)
+    pattern = re.compile(r"""(?:src|href|action|data-src|poster)\s*=\s*["']?(http://[^"'\s>]+)""", re.I)
     found = []
     for m in pattern.finditer(body):
         url = m.group(1)
@@ -3271,14 +3282,14 @@ def extract_js_endpoints(resp, timeout=8):
         if ".js" in u:
             js_urls.add(u)
     endpoints = set()
-    url_pat = re.compile(r'''["'](https?://[^"'\s]+|/api/[a-zA-Z0-9_\-/]+|/v[0-9]+/[a-zA-Z0-9_\-/]+)["']''')
+    url_pat = re.compile(r"""["'](https?://[^"'\s]+|/api/[a-zA-Z0-9_\-/]+|/v[0-9]+/[a-zA-Z0-9_\-/]+)["']""")
     for js_url in list(js_urls)[:20]:
         r = http_request(js_url, timeout=timeout)
         if r.get("ok") and r.get("status") == 200:
             js_body = r.get("body") or ""
             for m in url_pat.finditer(js_body):
                 endpoints.add(m.group(1))
-            for m in re.finditer(r'''(?:fetch|axios\.(?:get|post|put|delete)|\$.ajax)\s*\(\s*["']([^"']+)["']''', js_body, re.I):
+            for m in re.finditer(r"""(?:fetch|axios\.(?:get|post|put|delete)|\$.ajax)\s*\(\s*["']([^"']+)["']""", js_body, re.I):
                 endpoints.add(m.group(1))
     for m in url_pat.finditer(body):
         endpoints.add(m.group(1))
@@ -4045,7 +4056,7 @@ def extract_all_links(resp, timeout=8):
     base = f"{parsed.scheme}://{parsed.netloc}"
     all_links = set()
     # href and src attributes
-    for m in re.finditer(r'''(?:href|src|action|data-src|data-href|poster)\s*=\s*["']([^"']+)''', body, re.I):
+    for m in re.finditer(r"""(?:href|src|action|data-src|data-href|poster)\s*=\s*["']([^"']+)""", body, re.I):
         link = m.group(1).strip()
         if link and not link.startswith(("javascript:", "mailto:", "tel:", "#", "data:")):
             all_links.add(link)
