@@ -1,5 +1,5 @@
 
-![bx2scannweb](images/bx2scannweb.png)
+![BX2 webscanner Banner](https://github.com/user-attachments/assets/xxxx-xxxx)
 
 
 ENG:
