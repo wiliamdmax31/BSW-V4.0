@@ -1,6 +1,3 @@
-
-![Logo](images/logo.png)
-
 ENG:
 Recon-X v4.0 - Professional Web Reconnaissance Framework
 
@@ -97,6 +94,9 @@ Modules (50+):
 
 Licence: Pour tests de securite autorises et usage educatif uniquement.
 Auteur: Equipe de Developpement Recon-X
+
+
+![Logo](images/logo.png)
 
 
 Ar:
