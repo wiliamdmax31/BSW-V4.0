@@ -1,5 +1,5 @@
 
-![BX2 webscanner](assets/banner.png)
+![banner.png](assets/banner.png)
 
 
 ENG:
