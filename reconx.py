@@ -7711,7 +7711,7 @@ def main():
     parser.add_argument("--proxy", help="HTTP/SOCKS proxy URL")
     parser.add_argument("--verify-tls", action="store_true", help="enable TLS certificate verification for all requests")
     parser.add_argument("--proxy-list", help="file with proxy list (one per line)")
-    parser.add_argument("--stealth", action="store_true", help="enable stealth mode (randomized delays)")
+    parser.add_argument("--stealth-mode", action="store_true", help="enable stealth mode (randomized delays)")
     parser.add_argument("--delay", type=float, default=0.0, help="delay between requests (seconds)")
     parser.add_argument("--schedule", type=int, default=0, help="schedule scans every N hours")
     parser.add_argument("--max-scans", type=int, default=0, help="max scheduled scans (0=unlimited)")
