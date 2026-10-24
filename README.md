@@ -1,5 +1,5 @@
 
-![Logo](images/bx2scannweb.png)
+![bx2scannweb](images/bx2scannweb.png)
 
 
 ENG:
