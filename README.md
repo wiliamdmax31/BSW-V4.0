@@ -1,5 +1,5 @@
 
-![banner.png](https://github.com/wiliamdmax31/Recon-X-/blob/main/BX2%20webscanner.png?raw=true)
+![banner.png](https://github.com/wiliamdmax31/Recon-X-/blob/main/BSW-X2.png?raw=true)
 
 
 ENG:
