@@ -4591,6 +4591,13 @@ def build_report(ctx):
         "tech_versions": ctx.get("tech_versions"),
         "dns_rebinding": ctx.get("dns_rebinding"),
         "proxy_stealth": ctx.get("proxy_stealth"),
+        "caa": ctx.get("caa"),
+        "tlsa": ctx.get("tlsa"),
+        "subdomain_alteration": ctx.get("subdomain_alteration"),
+        "robots_deep": ctx.get("robots_deep"),
+        "sitemap_analysis": ctx.get("sitemap_analysis"),
+        "cvss_scores": ctx.get("cvss_scores"),
+        "csv_export": ctx.get("csv_export"),
         "links": ctx.get("links"),
         "media": ctx.get("media"),
         "metadata": ctx.get("metadata"),
@@ -6644,6 +6651,691 @@ def run_os_fingerprint(ctx, host, args):
     if res.get("details"):
         p_note("Details", res["details"])
 
+# ================= PROXY ROTATION & STEALTH ENGINE =================
+import random as _rnd
+
+# Global proxy pool
+PROXY_POOL = []
+PROXY_INDEX = 0
+STEALTH_JITTER_MIN = 0.3
+STEALTH_JITTER_MAX = 2.5
+STEALTH_UA_ROTATION = True
+REQUEST_ORDER_RANDOMIZE = True
+
+def load_proxy_list(filepath):
+    """Load proxies from a file (one per line: http://ip:port or socks5://ip:port)."""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    PROXY_POOL.append(line)
+        return len(PROXY_POOL)
+    except Exception:
+        return 0
+
+def get_next_proxy():
+    """Get next proxy from pool (round-robin)."""
+    global PROXY_INDEX
+    if not PROXY_POOL:
+        return None
+    proxy = PROXY_POOL[PROXY_INDEX % len(PROXY_POOL)]
+    PROXY_INDEX += 1
+    return proxy
+
+def stealth_sleep():
+    """Randomized delay for stealth mode (mimics human browsing)."""
+    if STEALTH_MODE:
+        # Random delay between 0.3s and 2.5s with jitter
+        delay = _rnd.uniform(STEALTH_JITTER_MIN, STEALTH_JITTER_MAX)
+        # Add extra jitter for some requests
+        if _rnd.random() < 0.3:
+            delay += _rnd.uniform(0.5, 1.5)
+        time.sleep(delay)
+    if THROTTLE_DELAY > 0:
+        time.sleep(THROTTLE_DELAY)
+
+def stealth_headers(base_headers=None):
+    """Generate stealth headers that mimic a real browser."""
+    h = dict(base_headers or {})
+    if STEALTH_MODE:
+        # Randomize User-Agent
+        h["User-Agent"] = _rnd.choice(UA_POOL)
+        # Add realistic browser headers
+        h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        h["Accept-Language"] = _rnd.choice(["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-US,en;q=0.5"])
+        h["Accept-Encoding"] = "gzip, deflate, br"
+        h["DNT"] = "1"
+        h["Connection"] = "keep-alive"
+        h["Upgrade-Insecure-Requests"] = "1"
+        # Randomize header order (mimic browser)
+        h["Sec-Fetch-Dest"] = "document"
+        h["Sec-Fetch-Mode"] = "navigate"
+        h["Sec-Fetch-Site"] = _rnd.choice(["none", "same-origin", "cross-site"])
+        h["Sec-Fetch-User"] = "?1"
+    return h
+
+# Patch http_request for stealth + proxy rotation
+_ORIGINAL_HTTP_REQUEST2 = http_request
+
+def stealth_http_request(url, method="GET", timeout=8, allow_redirects=True, headers=None, data=None):
+    """Stealth-aware HTTP request with proxy rotation."""
+    stealth_sleep()
+    h = stealth_headers(headers)
+    # Proxy rotation
+    proxy = get_next_proxy()
+    if proxy:
+        os.environ["HTTP_PROXY"] = proxy
+        os.environ["HTTPS_PROXY"] = proxy
+        os.environ["http_proxy"] = proxy
+        os.environ["https_proxy"] = proxy
+    # Apply proxy via env (requests reads env automatically)
+    return _orig_http_request(url, method=method, timeout=timeout,
+                              allow_redirects=allow_redirects, headers=h, data=data)
+
+# ================= SMART WORDLIST GENERATOR =================
+def generate_smart_wordlist(target, industry=None):
+    """Generate a smart wordlist based on target name and industry."""
+    base = target.split(".")[0].lower() if "." in target else target.lower()
+    words = set()
+    # Company name variations
+    words.add(base)
+    words.add(base + "1")
+    words.add(base + "2")
+    words.add(base + "-dev")
+    words.add(base + "-staging")
+    words.add(base + "-test")
+    words.add(base + "-prod")
+    words.add(base + "-backup")
+    words.add(base + "-api")
+    words.add(base + "-admin")
+    words.add(base + "-internal")
+    words.add(base + "-portal")
+    words.add(base + "-app")
+    words.add(base + "-web")
+    words.add(base + "-mail")
+    words.add(base + "-vpn")
+    words.add(base + "-cdn")
+    words.add(base + "-static")
+    words.add(base + "-assets")
+    words.add(base + "-media")
+    words.add(base + "-images")
+    words.add(base + "-files")
+    words.add(base + "-docs")
+    words.add(base + "-help")
+    words.add(base + "-support")
+    words.add(base + "-blog")
+    words.add(base + "-shop")
+    words.add(base + "-store")
+    words.add(base + "-pay")
+    words.add(base + "-billing")
+    words.add(base + "-account")
+    words.add(base + "-login")
+    words.add(base + "-register")
+    words.add(base + "-signup")
+    words.add(base + "-dashboard")
+    words.add(base + "-panel")
+    words.add(base + "-console")
+    words.add(base + "-manage")
+    words.add(base + "-config")
+    words.add(base + "-settings")
+    words.add(base + "-profile")
+    words.add(base + "-user")
+    words.add(base + "-users")
+    words.add(base + "-admin")
+    words.add(base + "-root")
+    words.add(base + "-super")
+    words.add(base + "-master")
+    words.add(base + "-system")
+    words.add(base + "-service")
+    words.add(base + "-api")
+    words.add(base + "-rest")
+    words.add(base + "-graphql")
+    words.add(base + "-ws")
+    words.add(base + "-socket")
+    words.add(base + "-realtime")
+    words.add(base + "-live")
+    words.add(base + "-stream")
+    words.add(base + "-video")
+    words.add(base + "-audio")
+    words.add(base + "-chat")
+    words.add(base + "-forum")
+    words.add(base + "-blog")
+    words.add(base + "-news")
+    words.add(base + "-press")
+    words.add(base + "-media")
+    words.add(base + "-pr")
+    words.add(base + "-marketing")
+    words.add(base + "-sales")
+    words.add(base + "-crm")
+    words.add(base + "-hr")
+    words.add(base + "-finance")
+    words.add(base + "-accounting")
+    words.add(base + "-payroll")
+    words.add(base + "-budget")
+    words.add(base + "-expense")
+    words.add(base + "-it")
+    words.add(base + "-tech")
+    words.add(base + "-technology")
+    words.add(base + "-engineering")
+    words.add(base + "-dev")
+    words.add(base + "-development")
+    words.add(base + "-qa")
+    words.add(base + "-test")
+    words.add(base + "-testing")
+    words.add(base + "-staging")
+    words.add(base + "-prod")
+    words.add(base + "-production")
+    words.add(base + "-live")
+    words.add(base + "-demo")
+    words.add(base + "-sandbox")
+    words.add(base + "-playground")
+    words.add(base + "-lab")
+    words.add(base + "-labs")
+    words.add(base + "-research")
+    words.add(base + "-training")
+    words.add(base + "-learn")
+    words.add(base + "-education")
+    words.add(base + "-edu")
+    words.add(base + "-university")
+    words.add(base + "-school")
+    # Industry-specific
+    if industry:
+        ind = industry.lower()
+        if "tech" in ind or "software" in ind:
+            words.update(["git", "svn", "ci", "cd", "jenkins", "gitlab", "github",
+                          "jira", "confluence", "wiki", "api", "sdk", "dev", "staging"])
+        if "finance" in ind or "bank" in ind:
+            words.update(["bank", "finance", "account", "transaction", "payment",
+                          "billing", "invoice", "loan", "credit", "debit"])
+        if "health" in ind or "medical" in ind:
+            words.update(["health", "medical", "patient", "doctor", "clinic",
+                          "hospital", "pharma", "drug", "lab"])
+        if "edu" in ind or "school" in ind or "university" in ind:
+            words.update(["edu", "school", "university", "student", "teacher",
+                          "course", "class", "grade", "exam"])
+        if "retail" in ind or "shop" in ind or "ecommerce" in ind:
+            words.update(["shop", "store", "cart", "checkout", "product",
+                          "order", "inventory", "warehouse", "shipping"])
+    # Combine with base wordlist
+    words.update(SUBDOMAIN_WORDLIST[:50])
+    return sorted(words)
+
+# ================= CONTINUOUS MONITORING =================
+MONITOR_INTERVAL = 3600  # seconds
+MONITOR_TARGETS = []
+MONITOR_ALERTS = {"telegram": None, "discord": None, "email": None}
+
+def send_alert(message, alert_type="console"):
+    """Send alert via configured channels."""
+    if alert_type == "telegram" and MONITOR_ALERTS.get("telegram"):
+        try:
+            token, chat_id = MONITOR_ALERTS["telegram"].split(":")
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            http_request(url, method="POST", data=f"chat_id={chat_id}&text={quote(message)}")
+        except Exception:
+            pass
+    elif alert_type == "discord" and MONITOR_ALERTS.get("discord"):
+        try:
+            http_request(MONITOR_ALERTS["discord"], method="POST",
+                        data=json.dumps({"content": message}),
+                        headers={"Content-Type": "application/json"})
+        except Exception:
+            pass
+    # Always print to console
+    p_warn("ALERT", message)
+
+def monitor_target(target, interval=3600, alert_channels=None, args=None):
+    """Continuous monitoring: scan target periodically and alert on changes."""
+    import time as _time
+    if args is None:
+        args = argparse.Namespace(paths=True, ports=True, dns=True, deep=False, quick=False, threads=8, timeout=8.0)
+    previous = None
+    scan_count = 0
+    while True:
+        scan_count += 1
+        p_section(f"Monitor Scan #{scan_count}: {target}", ">>")
+        url = normalize_url(target)
+        if not url:
+            break
+        host = get_host(url)
+        if not host:
+            break
+        parsed = urlparse(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        ctx = {"target": target, "url": url, "host": host, "modules_run": [],
+               "open_ports": [], "exposed_paths": [], "dns_ips": []}
+        # Run key modules
+        for name, fn in [("http", lambda: run_http(ctx, url, args)),
+                         ("tls", lambda: run_tls(ctx, host, port, args)),
+                         ("paths", lambda: run_paths(ctx, url, args)),
+                         ("ports", lambda: run_ports(ctx, host, args)),
+                         ("score", lambda: run_score(ctx))]:
+            try:
+                fn()
+            except Exception as e:
+                p_warn(f"module {name}", str(e))
+        # Compare with previous
+        if previous:
+            diff = diff_scans(previous, ctx)
+            if diff.get("added") or diff.get("removed") or diff.get("changed"):
+                alert_msg = f"Changes detected on {target}:\n"
+                for d in diff.get("added", []):
+                    alert_msg += f"  Added {d['field']}: {d.get('added', [])}\n"
+                for d in diff.get("removed", []):
+                    alert_msg += f"  Removed {d['field']}: {d.get('removed', [])}\n"
+                for d in diff.get("changed", []):
+                    alert_msg += f"  Changed {d['field']}: {d.get('old')} -> {d.get('new')}\n"
+                send_alert(alert_msg, alert_type=alert_channels or "console")
+        previous = ctx
+        p_note("Monitor", f"Next scan in {interval}s")
+        _time.sleep(interval)
+
+# ================= AUTO-FINGERPRINTING =================
+def auto_fingerprint(ctx):
+    """Auto-detect technologies and match against known CVEs."""
+    tech = ctx.get("tech", [])
+    versions = ctx.get("tech_versions", [])
+    if not versions:
+        versions = detect_tech_versions(ctx.get("http_resp") or {})
+    ctx["tech_versions"] = versions
+    cves = lookup_cves(versions, timeout=10) if versions else []
+    ctx["tech_cve"] = cves
+    return {"technologies": tech, "versions": versions, "cves": cves}
+
+# ================= RUNNERS =================
+
+def run_smart_wordlist(ctx, host, args):
+    p_section("Smart Wordlist Generation", "94")
+    ctx["modules_run"].append("smart_wordlist")
+    if is_ip(host):
+        p_note("Smart wordlist", "not measured - target is an IP")
+        ctx["smart_wordlist"] = []
+        return
+    # Detect industry from tech fingerprints
+    industry = None
+    tech = ctx.get("tech", [])
+    tech_names = [t.get("name", "").lower() for t in tech]
+    if any("shop" in t or "commerce" in t or "store" in t for t in tech_names):
+        industry = "retail"
+    elif any("wp" in t or "wordpress" in t for t in tech_names):
+        industry = "cms"
+    elif any("api" in t or "rest" in t for t in tech_names):
+        industry = "tech"
+    words = generate_smart_wordlist(host, industry=industry)
+    ctx["smart_wordlist"] = words
+    p_ok("Generated", f"{len(words)} words (industry: {industry or 'general'})")
+    # Run DNS brute-force with smart wordlist
+    found = dns_bruteforce_subdomains(host, timeout=min(3.0, args.timeout),
+                                      workers=min(args.threads, 20), wordlist=words)
+    ctx["smart_subdomains"] = found
+    if found:
+        p_ok("Smart subdomains found", len(found))
+        for r in found[:20]:
+            p_ok(r["name"], r["ip"])
+        if len(found) > 20:
+            p_note("More", f"{len(found) - 20} additional in JSON report")
+    else:
+        p_ok("Smart subdomains", "none found")
+
+def run_auto_fingerprint(ctx, url, args):
+    p_section("Auto-Fingerprinting & CVE Matching", "95")
+    ctx["modules_run"].append("auto_fingerprint")
+    resp = ctx.get("http_resp")
+    if not resp or not ctx.get("http_ok"):
+        p_note("Auto-fingerprint", "not measured - no HTTP response")
+        ctx["auto_fingerprint"] = None
+        return
+    res = auto_fingerprint(ctx)
+    ctx["auto_fingerprint"] = res
+    techs = res.get("technologies", [])
+    versions = res.get("versions", [])
+    cves = res.get("cves", [])
+    p_ok("Technologies", len(techs))
+    p_ok("Versions detected", len(versions))
+    for v in versions:
+        p_ok(f"  {v['tech']}", v["version"])
+    if cves:
+        p_bad("CVEs found", len(cves))
+        for c in cves:
+            p_bad(f"  {c['tech']} {c['version']}", f"{len(c['cves'])} CVEs")
+            for cv in c["cves"][:3]:
+                p_note(f"    {cv['id']}", f"CVSS {cv['cvss']}: {shorten(cv['description'], 50)}", C.GR)
+    else:
+        p_ok("CVEs", "none found for detected versions")
+
+# ================= CAA RECORD LOOKUP =================
+def lookup_caa(host, timeout=8):
+    """Live: check CAA (Certificate Authority Authorization) records."""
+    if not HAS_DNS:
+        return {"records": [], "notes": ["dnspython not installed"]}
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 5
+    resolver.lifetime = 8
+    records = []
+    try:
+        answers = resolver.resolve(host, "CAA")
+        for r in answers:
+            # CAA record: flags, tag, value
+            flags = getattr(r, "flags", 0)
+            tag = getattr(r, "tag", "")
+            value = getattr(r, "value", "")
+            records.append({"flags": flags, "tag": tag, "value": value})
+    except Exception as e:
+        return {"records": [], "notes": [str(e)]}
+    return {"records": records, "notes": []}
+
+# ================= TLSA / DANE =================
+def lookup_tlsa(host, port=443, timeout=8):
+    """Live: check TLSA (DANE) records for certificate pinning."""
+    if not HAS_DNS:
+        return {"records": [], "notes": ["dnspython not installed"]}
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 5
+    resolver.lifetime = 8
+    qname = f"_{port}._tcp.{host}"
+    records = []
+    try:
+        answers = resolver.resolve(qname, "TLSA")
+        for r in answers:
+            records.append({
+                "usage": getattr(r, "usage", None),
+                "selector": getattr(r, "selector", None),
+                "matching_type": getattr(r, "matching_type", None),
+                "certificate": str(r).split()[-1] if str(r).split() else "",
+            })
+    except Exception as e:
+        return {"records": [], "notes": [str(e)]}
+    return {"records": records, "notes": []}
+
+# ================= SUBDOMAIN ALTERATION =================
+ALTERATION_PREFIXES = ["dev", "staging", "test", "prod", "api", "admin", "beta",
+                       "v1", "v2", "v3", "old", "new", "backup", "internal",
+                       "secure", "login", "portal", "app", "web", "mail",
+                       "www", "m", "mobile", "admin", "manage", "console"]
+
+def alter_subdomains(domain, known_subs, timeout=5, workers=20):
+    """Live: alter known subdomains by changing prefixes/suffixes."""
+    found = []
+    candidates = set()
+    for sub in (known_subs or []):
+        name = sub.get("name") if isinstance(sub, dict) else str(sub)
+        if not name or not name.endswith(domain):
+            continue
+        prefix = name.replace("." + domain, "").split(".")[0]
+        # Alter prefix
+        for alt in ALTERATION_PREFIXES:
+            if alt != prefix:
+                candidates.add(f"{alt}.{domain}")
+                candidates.add(f"{alt}-{prefix}.{domain}")
+                candidates.add(f"{prefix}-{alt}.{domain}")
+        # Alter TLD
+        for tld in [".com", ".net", ".org", ".io", ".co", ".dev", ".app"]:
+            if not name.endswith(tld):
+                base_name = name.rsplit(".", 1)[0]
+                candidates.add(f"{base_name}{tld}")
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(resolve_hostname, c): c for c in candidates}
+        for fut in as_completed(futures):
+            try:
+                r = fut.result()
+                if r.get("ip"):
+                    found.append(r)
+            except Exception:
+                pass
+    found.sort(key=lambda x: x["name"])
+    return found
+
+# ================= ROBOTS.TXT DISALLOW PATH PROBING =================
+def probe_robots_paths(base_url, robots_data, timeout=6):
+    """Live: probe all Disallow paths from robots.txt."""
+    if not robots_data or not robots_data.get("found"):
+        return []
+    disallow = robots_data.get("disallow", [])
+    found = []
+    root = base_url if base_url.endswith("/") else base_url + "/"
+    for path in disallow:
+        if not path or path == "/":
+            continue
+        url = root.rstrip("/") + path
+        r = http_request(url, timeout=timeout, method="HEAD")
+        if r.get("ok") and r.get("status", 0) not in (0, 404):
+            found.append({"path": path, "url": url, "status": r.get("status", 0)})
+    return found
+
+# ================= SITEMAP PRIORITY ANALYSIS =================
+def analyze_sitemap_priorities(sitemap_data):
+    """Analyze sitemap URLs for priority and lastmod patterns."""
+    if not sitemap_data or not sitemap_data.get("urls"):
+        return {"total": 0, "with_priority": 0, "with_lastmod": 0, "patterns": []}
+    urls = sitemap_data.get("urls", [])
+    # Re-fetch to get priority/lastmod (the extractor only gets loc)
+    # For now, analyze URL patterns
+    patterns = {}
+    for u in urls:
+        parsed = urlparse(u)
+        path = parsed.path
+        # Count by first path segment
+        seg = path.strip("/").split("/")[0] if path.strip("/") else "(root)"
+        patterns[seg] = patterns.get(seg, 0) + 1
+    return {"total": len(urls), "patterns": patterns,
+            "top_segments": sorted(patterns.items(), key=lambda x: -x[1])[:10]}
+
+# ================= CVSS SCORING =================
+def calculate_cvss(vuln):
+    """Calculate a simplified CVSS-like score for a vulnerability."""
+    severity = vuln.get("severity", "Low")
+    base_scores = {"Critical": 9.0, "High": 7.5, "Medium": 5.0, "Low": 2.5, "Info": 0.5}
+    score = base_scores.get(severity, 0.5)
+    # Adjust based on category
+    cat = vuln.get("category", "")
+    if "Injection" in cat or "RCE" in cat or "Takeover" in cat:
+        score = min(10.0, score + 1.0)
+    if "Disclosure" in cat or "Leak" in cat:
+        score = min(10.0, score + 0.5)
+    return round(score, 1)
+
+# ================= CSV EXPORT =================
+def export_csv_report(ctx, filepath):
+    """Export vulnerability inventory as CSV."""
+    inv = ctx.get("vuln_inventory", []) or []
+    import csv
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["#", "Severity", "Category", "Title", "Location", "Source", "Evidence", "CVSS"])
+        for idx, v in enumerate(inv, 1):
+            writer.writerow([
+                idx, v.get("severity", ""), v.get("category", ""),
+                v.get("title", ""), v.get("location", ""),
+                v.get("source", ""), v.get("evidence", ""),
+                calculate_cvss(v)
+            ])
+    return True
+
+# ================= SCHEDULED SCAN =================
+def scheduled_scan(target, interval_hours=24, max_scans=0, args=None):
+    """Run scheduled scans at regular intervals."""
+    import time as _time
+    scan_count = 0
+    while True:
+        scan_count += 1
+        p_section(f"Scheduled Scan #{scan_count}: {target}", ">>")
+        url = normalize_url(target)
+        if not url:
+            break
+        host = get_host(url)
+        if not host:
+            break
+        parsed = urlparse(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        ctx = {"target": target, "url": url, "host": host, "modules_run": [],
+               "open_ports": [], "exposed_paths": [], "dns_ips": []}
+        # Run all modules
+        steps = [
+            ("dns", lambda: run_dns(ctx, host, args) if args and args.dns else None),
+            ("http", lambda: run_http(ctx, url, args)),
+            ("tls", lambda: run_tls(ctx, host, port, args)),
+            ("headers", lambda: run_headers(ctx, url, args)),
+            ("paths", lambda: run_paths(ctx, url, args) if args and args.paths else None),
+            ("vuln_inventory", lambda: run_vuln_inventory(ctx, args)),
+            ("score", lambda: run_score(ctx)),
+        ]
+        for name, fn in steps:
+            try:
+                fn()
+            except Exception as e:
+                p_warn(f"module {name}", str(e))
+        # Save report
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"scan_{target.replace('://', '_').replace('/', '_')}_{ts}.json"
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(build_report(ctx), f, indent=2, default=str)
+            p_ok("Report saved", filename)
+        except Exception as e:
+            p_bad("Report", str(e))
+        if max_scans > 0 and scan_count >= max_scans:
+            p_ok("Scheduled scan", f"completed {max_scans} scans")
+            break
+        p_note("Next scan", f"in {interval_hours} hours")
+        _time.sleep(interval_hours * 3600)
+
+# ================= RUNNERS =================
+
+def run_caa(ctx, host, args):
+    p_section("CAA Record Lookup", "94")
+    ctx["modules_run"].append("caa")
+    if is_ip(host):
+        p_note("CAA", "not measured - target is an IP")
+        ctx["caa"] = None
+        return
+    res = lookup_caa(host, timeout=args.timeout)
+    ctx["caa"] = res
+    if res["records"]:
+        p_ok("CAA records", len(res["records"]))
+        for r in res["records"]:
+            p_ok(f"  {r['tag']}", f"flags={r['flags']} value={r['value']}")
+    else:
+        p_warn("CAA", "no CAA records found")
+
+def run_tlsa(ctx, host, args):
+    p_section("TLSA / DANE Check", "95")
+    ctx["modules_run"].append("tlsa")
+    if is_ip(host):
+        p_note("TLSA", "not measured - target is an IP")
+        ctx["tlsa"] = None
+        return
+    port = 443
+    res = lookup_tlsa(host, port=port, timeout=args.timeout)
+    ctx["tlsa"] = res
+    if res["records"]:
+        p_ok("TLSA records", len(res["records"]))
+        for r in res["records"]:
+            p_ok(f"  usage={r['usage']} selector={r['selector']} matching={r['matching_type']}",
+                 r["certificate"][:40])
+    else:
+        p_note("TLSA", "no TLSA records found (DANE not configured)")
+
+def run_subdomain_alteration(ctx, host, args):
+    p_section("Subdomain Alteration", "96")
+    ctx["modules_run"].append("subdomain_alteration")
+    if is_ip(host):
+        p_note("Alteration", "not measured - target is an IP")
+        ctx["subdomain_alteration"] = []
+        return
+    subs = ctx.get("subdomains") or []
+    if not subs:
+        p_note("Alteration", "not measured - no subdomains enumerated")
+        ctx["subdomain_alteration"] = []
+        return
+    found = alter_subdomains(host, subs, timeout=args.timeout, workers=args.threads)
+    ctx["subdomain_alteration"] = found
+    if found:
+        p_ok("Alterations found", len(found))
+        for r in found[:20]:
+            p_ok(r["name"], r["ip"])
+        if len(found) > 20:
+            p_note("More", f"{len(found) - 20} additional in JSON report")
+    else:
+        p_ok("Alteration", "no new subdomains found")
+
+def run_robots_deep(ctx, url, args):
+    p_section("Robots.txt Deep Probe", "97")
+    ctx["modules_run"].append("robots_deep")
+    robots = ctx.get("robots")
+    if not robots or not robots.get("found"):
+        p_note("Robots deep", "not measured - no robots.txt found")
+        ctx["robots_deep"] = []
+        return
+    found = probe_robots_paths(url, robots, timeout=args.timeout)
+    ctx["robots_deep"] = found
+    if found:
+        p_ok("Probed paths", len(found))
+        for f in found:
+            p_ok(f["path"], f"HTTP {f['status']}")
+    else:
+        p_ok("Robots deep", "no accessible Disallow paths")
+
+def run_sitemap_analysis(ctx, url, args):
+    p_section("Sitemap Priority Analysis", "98")
+    ctx["modules_run"].append("sitemap_analysis")
+    sitemap = ctx.get("sitemap")
+    if not sitemap or not sitemap.get("urls"):
+        p_note("Sitemap analysis", "not measured - no sitemap found")
+        ctx["sitemap_analysis"] = {}
+        return
+    analysis = analyze_sitemap_priorities(sitemap)
+    ctx["sitemap_analysis"] = analysis
+    p_ok("Total URLs", analysis["total"])
+    if analysis.get("top_segments"):
+        p_ok("Top segments", len(analysis["top_segments"]))
+        for seg, count in analysis["top_segments"][:10]:
+            p_note(f"  {seg}", count, C.GR)
+
+def run_cvss_scoring(ctx, args):
+    p_section("CVSS Scoring", "99")
+    ctx["modules_run"].append("cvss_scoring")
+    inv = ctx.get("vuln_inventory", [])
+    if not inv:
+        p_note("CVSS", "no vulnerabilities to score")
+        ctx["cvss_scores"] = []
+        return
+    scores = []
+    for v in inv:
+        score = calculate_cvss(v)
+        scores.append({"title": v.get("title", ""), "severity": v.get("severity", ""),
+                       "cvss": score})
+    ctx["cvss_scores"] = scores
+    # Sort by CVSS descending
+    scores.sort(key=lambda x: -x["cvss"])
+    p_ok("Scored vulnerabilities", len(scores))
+    for s in scores[:10]:
+        p_ok(f"  {s['title'][:40]}", f"CVSS {s['cvss']} ({s['severity']})")
+
+def run_csv_export(ctx, url, args):
+    p_section("CSV Export", "100")
+    ctx["modules_run"].append("csv_export")
+    filepath = args.output.replace(".json", ".csv") if args.output else "vulns.csv"
+    try:
+        export_csv_report(ctx, filepath)
+        p_ok("CSV report", f"saved to {filepath}")
+        ctx["csv_export"] = filepath
+    except Exception as e:
+        p_bad("CSV report", str(e))
+        ctx["csv_export"] = None
+
+def run_scheduled_scan(ctx, args):
+    p_section("Scheduled Scan", "101")
+    ctx["modules_run"].append("scheduled_scan")
+    p_note("Scheduled scan", "use --schedule N to enable (N = hours between scans)")
+    p_note("Scheduled scan", "use --max-scans N to limit number of scans (0 = unlimited)")
+    if getattr(args, "schedule", 0) and args.schedule > 0:
+        max_scans = getattr(args, "max_scans", 0)
+        scheduled_scan(ctx.get("target", ""), interval_hours=args.schedule,
+                       max_scans=max_scans, args=args)
+    else:
+        p_ok("Scheduled scan", "disabled (use --schedule N)")
+
 def main():
     global QUIET, STEALTH_MODE, THROTTLE_DELAY
     parser = argparse.ArgumentParser(
@@ -6667,6 +7359,11 @@ def main():
     parser.add_argument("--stealth", action="store_true", help="enable stealth mode (randomized delays)")
     parser.add_argument("--delay", type=float, default=0.0, help="delay between requests (seconds)")
     parser.add_argument("--proxy", help="HTTP/SOCKS proxy URL")
+    parser.add_argument("--proxy-list", help="file with proxy list (one per line)")
+    parser.add_argument("--stealth", action="store_true", help="enable stealth mode (randomized delays)")
+    parser.add_argument("--delay", type=float, default=0.0, help="delay between requests (seconds)")
+    parser.add_argument("--schedule", type=int, default=0, help="schedule scans every N hours")
+    parser.add_argument("--max-scans", type=int, default=0, help="max scheduled scans (0=unlimited)")
     args = parser.parse_args()
 
     if args.json_only:
@@ -6682,6 +7379,9 @@ def main():
         os.environ["HTTPS_PROXY"] = args.proxy
         os.environ["http_proxy"] = args.proxy
         os.environ["https_proxy"] = args.proxy
+    if getattr(args, "proxy_list", None):
+        n = load_proxy_list(args.proxy_list)
+        p_ok("Proxy list", f"{n} proxies loaded")
 
     if not args.no_banner:
         boot_animation()
@@ -6870,6 +7570,14 @@ def main():
         ("tech_versions", lambda: run_tech_versions(ctx, url, args)),
         ("dns_rebinding", lambda: run_dns_rebinding(ctx, host, args)),
         ("proxy_stealth", lambda: run_proxy_stealth(ctx, args)),
+        ("caa", lambda: run_caa(ctx, host, args)),
+        ("tlsa", lambda: run_tlsa(ctx, host, args)),
+        ("subdomain_alteration", lambda: run_subdomain_alteration(ctx, host, args)),
+        ("robots_deep", lambda: run_robots_deep(ctx, url, args)),
+        ("sitemap_analysis", lambda: run_sitemap_analysis(ctx, url, args)),
+        ("cvss_scoring", lambda: run_cvss_scoring(ctx, args)),
+        ("csv_export", lambda: run_csv_export(ctx, url, args)),
+        ("scheduled_scan", lambda: run_scheduled_scan(ctx, args)),
         ("http3", lambda: run_http3(ctx, url, args)),
         ("dkim", lambda: run_dkim(ctx, host, args)),
         ("bimi_deep", lambda: run_bimi_deep(ctx, host, args)),
