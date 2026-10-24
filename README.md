@@ -1,8 +1,5 @@
 
-![Logo](images/BX2 webscanne.png)
-
-
-
+![Logo](images/bx2scannweb.png)
 
 
 ENG:
