@@ -273,13 +273,18 @@ def http_request(url, method="GET", timeout=8, allow_redirects=True, headers=Non
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "identity",
         "Connection": "close",
-        "X-Forwarded-For": rnd_ip(),
+        # Note: X-Forwarded-For does NOT hide the real IP.
+        # It is only used for testing server-side IP handling.
+        # Do NOT rely on it for anonymity.
     }
     if headers:
         h.update(headers)
 
     if HAS_REQ:
         try:
+            if not verify and VERIFY_TLS is False:
+                # TLS verification disabled - warn once
+                pass
             r = requests.request(method, url, headers=h, timeout=timeout,
                                  allow_redirects=allow_redirects, verify=verify, data=data)
             # collect EVERY Set-Cookie header (requests collapses them in .headers)
@@ -7497,6 +7502,190 @@ def _truncate_response(body, max_size=MAX_RESPONSE_SIZE):
         return body[:max_size] + f"\n... [truncated, original size: {len(body)} bytes]"
     return body
 
+# ================= CONFIGURATION FILE SUPPORT =================
+import json as _json
+
+def load_config(filepath):
+    """Load scan configuration from a JSON/YAML file."""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+        # Try JSON first
+        try:
+            return _json.loads(content)
+        except _json.JSONDecodeError:
+            pass
+        # Try YAML
+        try:
+            import yaml
+            return yaml.safe_load(content)
+        except ImportError:
+            pass
+        # Try simple key=value format
+        config = {}
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                config[k.strip()] = v.strip()
+        return config
+    except Exception as e:
+        return {"error": str(e)}
+
+def save_config(config, filepath):
+    """Save scan configuration to a JSON file."""
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            _json.dump(config, f, indent=2, default=str)
+        return True
+    except Exception:
+        return False
+
+# ================= SCAN DURATION TRACKING =================
+SCAN_TIMINGS = {}
+SCAN_START_TIME = None
+
+def start_scan_timer():
+    """Start the overall scan timer."""
+    global SCAN_START_TIME
+    SCAN_START_TIME = time.time()
+
+def record_module_time(module_name, elapsed):
+    """Record how long a module took."""
+    SCAN_TIMINGS[module_name] = round(elapsed, 3)
+
+def get_scan_duration():
+    """Get total scan duration."""
+    if SCAN_START_TIME:
+        return round(time.time() - SCAN_START_TIME, 2)
+    return 0.0
+
+# ================= PROGRESS INDICATOR =================
+SCAN_PROGRESS = {"current": 0, "total": 0, "module": "", "percent": 0}
+
+def update_progress(current, total, module_name=""):
+    """Update scan progress."""
+    SCAN_PROGRESS["current"] = current
+    SCAN_PROGRESS["total"] = total
+    SCAN_PROGRESS["module"] = module_name
+    SCAN_PROGRESS["percent"] = int((current / total * 100) if total > 0 else 0)
+
+def show_progress():
+    """Show current scan progress."""
+    p = SCAN_PROGRESS
+    if p["total"] > 0:
+        bar_len = 30
+        filled = int(bar_len * p["current"] / p["total"])
+        bar = "#" * filled + "-" * (bar_len - filled)
+        p_note("Progress", f"[{bar}] {p['percent']}% - {p['module']}")
+
+# ================= REQUEST/RESPONSE LOGGER =================
+REQUEST_LOG = []
+REQUEST_LOG_FILE = None
+
+def log_request(method, url, status, elapsed, size):
+    """Log an HTTP request for debugging."""
+    entry = {"time": datetime.datetime.now().isoformat(timespec="seconds"),
+             "method": method, "url": url, "status": status,
+             "elapsed_ms": round(elapsed * 1000, 1), "size": size}
+    REQUEST_LOG.append(entry)
+    if REQUEST_LOG_FILE:
+        try:
+            with open(REQUEST_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        except Exception:
+            pass
+
+def enable_request_logging(filepath):
+    """Enable request logging to a file."""
+    global REQUEST_LOG_FILE
+    REQUEST_LOG_FILE = filepath
+    # Clear the file
+    try:
+        open(filepath, "w", encoding="utf-8").close()
+    except Exception:
+        pass
+
+# ================= MEMORY MONITOR =================
+def get_memory_usage():
+    """Get current memory usage in MB."""
+    try:
+        import psutil
+        proc = psutil.Process()
+        return round(proc.memory_info().rss / 1024 / 1024, 1)
+    except ImportError:
+        # Fallback: use resource module (Unix only)
+        try:
+            import resource
+            return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+        except Exception:
+            return 0.0
+    except Exception:
+        return 0.0
+
+# ================= RUNNERS =================
+
+def run_config_loader(ctx, args):
+    p_section("Configuration Loader", "102")
+    ctx["modules_run"].append("config_loader")
+    config_file = getattr(args, "config", None)
+    if config_file:
+        config = load_config(config_file)
+        if "error" in config:
+            p_bad("Config", config["error"])
+            ctx["config"] = None
+        else:
+            p_ok("Config loaded", config_file)
+            p_ok("Keys", len(config))
+            for k, v in list(config.items())[:10]:
+                p_note(f"  {k}", str(v)[:60], C.GR)
+            ctx["config"] = config
+    else:
+        p_note("Config", "not provided (use --config file)")
+        ctx["config"] = None
+
+def run_scan_timer(ctx, args):
+    p_section("Scan Duration Tracking", "103")
+    ctx["modules_run"].append("scan_timer")
+    duration = get_scan_duration()
+    ctx["scan_duration"] = duration
+    p_ok("Total duration", f"{duration}s")
+    # Show per-module timings
+    if SCAN_TIMINGS:
+        p_ok("Modules timed", len(SCAN_TIMINGS))
+        for mod, elapsed in sorted(SCAN_TIMINGS.items(), key=lambda x: -x[1])[:10]:
+            p_note(f"  {mod}", f"{elapsed}s", C.GR)
+    # Memory usage
+    mem = get_memory_usage()
+    if mem > 0:
+        p_ok("Peak memory", f"{mem} MB")
+
+def run_request_logger(ctx, args):
+    p_section("Request/Response Logger", "104")
+    ctx["modules_run"].append("request_logger")
+    log_file = getattr(args, "request_log", None)
+    if log_file:
+        enable_request_logging(log_file)
+        p_ok("Logging enabled", log_file)
+        ctx["request_log_file"] = log_file
+    else:
+        p_note("Request log", "not enabled (use --request-log file)")
+        ctx["request_log_file"] = None
+    ctx["request_log"] = REQUEST_LOG
+
+def run_progress(ctx, args):
+    p_section("Scan Progress", "105")
+    ctx["modules_run"].append("progress")
+    p = SCAN_PROGRESS
+    if p["total"] > 0:
+        p_ok("Progress", f"{p['percent']}% ({p['current']}/{p['total']})")
+        p_ok("Current module", p["module"])
+    else:
+        p_note("Progress", "no progress data")
+    ctx["progress"] = p
+
 def main():
     global QUIET, STEALTH_MODE, THROTTLE_DELAY
     parser = argparse.ArgumentParser(
@@ -7661,6 +7850,8 @@ def main():
     p_ok("Port", port)
     p_ok("Engine", "requests" if HAS_REQ else "urllib fallback")
     p_ok("DNS engine", "dnspython" if HAS_DNS else "socket fallback")
+    if not VERIFY_TLS:
+        p_warn("TLS verify", "disabled (use --verify-tls for strict mode)")
 
     steps = [
         ("dns", lambda: run_dns(ctx, host, args) if args.dns else None),
