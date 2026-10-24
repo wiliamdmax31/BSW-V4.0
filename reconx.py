@@ -263,7 +263,9 @@ class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
-def http_request(url, method="GET", timeout=8, allow_redirects=True, headers=None, data=None):
+def http_request(url, method="GET", timeout=8, allow_redirects=True, headers=None, data=None, verify=None, max_size=None):
+    if verify is None:
+        verify = VERIFY_TLS
     """Single HTTP request. Returns ok/status/headers/body/url/elapsed/error."""
     h = {
         "User-Agent": rnd_ua(),
@@ -279,7 +281,7 @@ def http_request(url, method="GET", timeout=8, allow_redirects=True, headers=Non
     if HAS_REQ:
         try:
             r = requests.request(method, url, headers=h, timeout=timeout,
-                                 allow_redirects=allow_redirects, verify=False, data=data)
+                                 allow_redirects=allow_redirects, verify=verify, data=data)
             # collect EVERY Set-Cookie header (requests collapses them in .headers)
             set_cookies = []
             try:
@@ -288,33 +290,48 @@ def http_request(url, method="GET", timeout=8, allow_redirects=True, headers=Non
                 pass
             if not set_cookies and r.headers.get("Set-Cookie"):
                 set_cookies = [r.headers.get("Set-Cookie")]
+            body = r.text if r.text else ""
+            # Apply response size limit
+            limit = max_size if max_size is not None else MAX_RESPONSE_SIZE
+            if body and len(body) > limit:
+                body = body[:limit] + f"\n... [truncated, original size: {len(body)} bytes]"
             return {
                 "ok": True,
                 "status": r.status_code,
                 "headers": {k.lower(): v for k, v in r.headers.items()},
-                "body": r.text if r.text else "",
+                "body": body,
                 "url": r.url,
                 "elapsed": r.elapsed.total_seconds() if r.elapsed else 0.0,
                 "set_cookie_list": set_cookies,
+                "verified": verify,
             }
         except Exception as e:
             return {"ok": False, "error": clean_error(e), "status": 0, "headers": {},
-                    "body": "", "url": url, "elapsed": 0.0, "set_cookie_list": []}
+                    "body": "", "url": url, "elapsed": 0.0, "set_cookie_list": [], "verified": verify}
 
     # urllib fallback
     try:
         t0 = time.time()
         payload = data.encode() if isinstance(data, str) else data
         req = Request(url, headers=h, method=method, data=payload)
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        if verify:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+        else:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
         opener = build_opener() if allow_redirects else build_opener(NoRedirect)
         kwargs = {"timeout": timeout}
         if url.lower().startswith("https://"):
             kwargs["context"] = ctx
         with opener.open(req, **kwargs) as resp:
-            body = resp.read().decode("utf-8", errors="ignore")
+            raw = resp.read()
+            limit = max_size if max_size is not None else MAX_RESPONSE_SIZE
+            if len(raw) > limit:
+                raw = raw[:limit]
+            body = raw.decode("utf-8", errors="ignore")
             sc_list = [v for (k, v) in resp.getheaders() if k.lower() == "set-cookie"]
             return {
                 "ok": True,
@@ -324,6 +341,7 @@ def http_request(url, method="GET", timeout=8, allow_redirects=True, headers=Non
                 "url": resp.geturl(),
                 "elapsed": time.time() - t0,
                 "set_cookie_list": sc_list,
+                "verified": verify,
             }
     except HTTPError as e:
         try:
@@ -344,6 +362,7 @@ def http_request(url, method="GET", timeout=8, allow_redirects=True, headers=Non
             "url": url,
             "elapsed": 0.0,
             "set_cookie_list": sc_list,
+            "verified": verify,
         }
     except URLError as e:
         return {"ok": False, "error": f"URLError: {e.reason}", "status": 0, "headers": {},
@@ -7336,6 +7355,148 @@ def run_scheduled_scan(ctx, args):
     else:
         p_ok("Scheduled scan", "disabled (use --schedule N)")
 
+# ================= TLS VERIFICATION & SECURITY HARDENING =================
+
+# Global TLS verification setting (set by --verify-tls flag)
+VERIFY_TLS = False
+MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # 5 MB max response size
+
+def _make_ssl_context(verify=False):
+    """Create an SSL context with optional verification."""
+    if verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        return ctx
+    else:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+# ================= LOGGING =================
+import logging as _logging
+_log = _logging.getLogger("reconx")
+_log.setLevel(_logging.WARNING)
+_handler = _logging.StreamHandler(sys.stderr)
+_handler.setFormatter(_logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+_log.addHandler(_handler)
+
+def set_log_level(level):
+    """Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL."""
+    _log.setLevel(getattr(_logging, level.upper(), _logging.WARNING))
+
+def log_debug(msg):
+    _log.debug(msg)
+
+def log_info(msg):
+    _log.info(msg)
+
+def log_warning(msg):
+    _log.warning(msg)
+
+def log_error(msg):
+    _log.error(msg)
+
+# ================= CONFIDENCE + REMEDIATION =================
+
+# Remediation suggestions for each vulnerability type
+REMEDIATION_MAP = {
+    "Sensitive file exposed": "Remove or restrict access to sensitive files. Use .htaccess, nginx config, or web server rules to block access to .env, .git, etc.",
+    "Directory listing": "Disable directory listing in web server configuration (Options -Indexes in Apache, autoindex off in Nginx).",
+    "Leaked": "Remove secrets from source code. Use environment variables or secret managers. Rotate compromised credentials immediately.",
+    "Subdomain Takeover": "Remove dangling DNS records or reclaim the service. Verify CNAME targets are properly configured.",
+    "Open redirect": "Validate and sanitize redirect URLs. Use a whitelist of allowed redirect targets.",
+    "Host Header Injection": "Configure the web server to reject requests with unexpected Host headers. Validate Host header against a whitelist.",
+    "Reflected parameter": "Implement proper output encoding. Use Content-Security-Policy to prevent XSS execution.",
+    "Mixed Content": "Serve all resources over HTTPS. Update HTTP URLs to HTTPS.",
+    "Password form without CSRF": "Add CSRF tokens to all forms. Use SameSite cookie attribute.",
+    "POST form without CSRF": "Add CSRF tokens to all POST forms.",
+    "Wildcard origin with credentials": "Do not use wildcard (*) origin with credentials. Specify exact allowed origins.",
+    "Missing HSTS": "Add Strict-Transport-Security header with max-age >= 31536000 (1 year).",
+    "Missing Content-Security-Policy": "Add Content-Security-Policy header to prevent XSS and data injection.",
+    "Missing X-Frame-Options": "Add X-Frame-Options: DENY or SAMEORIGIN to prevent clickjacking.",
+    "Missing X-Content-Type-Options": "Add X-Content-Type-Options: nosniff to prevent MIME sniffing.",
+    "Missing Referrer-Policy": "Add Referrer-Policy: strict-origin-when-cross-origin or no-referrer.",
+    "Missing Permissions-Policy": "Add Permissions-Policy to restrict browser features.",
+    "Missing COOP": "Add Cross-Origin-Opener-Policy: same-origin to prevent cross-origin attacks.",
+    "Missing COEP": "Add Cross-Origin-Embedder-Policy: require-corp for cross-origin isolation.",
+    "Missing CORP": "Add Cross-Origin-Resource-Policy: same-origin to prevent cross-origin reads.",
+    "Weak value": "Strengthen the header value. Increase HSTS max-age, remove unsafe-inline/unsafe-eval from CSP.",
+    "Insecure Cookie": "Add Secure, HttpOnly, and SameSite attributes to cookies.",
+    "Risky port": "Close unnecessary ports. Restrict access via firewall. Use VPN for admin access.",
+    "Source map exposed": "Remove source maps from production. Configure build to not generate them.",
+    "No SPF record": "Add SPF TXT record: v=spf1 include:_spf.example.com ~all",
+    "No DMARC record": "Add DMARC TXT record: v=DMARC1; p=reject; rua=mailto:dmarc@example.com",
+    "No MTA-STS": "Add MTA-STS policy for email security.",
+    "Certificate not trusted": "Use a certificate from a trusted CA. Ensure full chain is served.",
+    "Certificate expired": "Renew the certificate before expiry. Set up auto-renewal (Let's Encrypt).",
+    "Self-signed certificate": "Replace with a certificate from a trusted CA.",
+    "Certificate does not cover hostname": "Reissue certificate with correct SAN/CN for the hostname.",
+    "Legacy TLS": "Disable TLS 1.0 and 1.1. Enable only TLS 1.2 and 1.3.",
+    "No modern TLS": "Enable TLS 1.2 and/or TLS 1.3 on the server.",
+    "DNS zone transfer": "Disable AXFR. Restrict zone transfers to authorized nameservers only.",
+    "No WAF/CDN": "Consider deploying a WAF (Cloudflare, AWS WAF, etc.) for protection.",
+    "Server version disclosed": "Configure server to not disclose version. Remove or modify Server header.",
+    "SQL Injection": "Use parameterized queries/prepared statements. Never concatenate user input into SQL.",
+    "Command Injection": "Avoid passing user input to OS commands. Use allowlists for command arguments.",
+    "Path Traversal": "Validate and sanitize file paths. Use allowlists. Avoid user input in file operations.",
+    "CRLF Injection": "Sanitize user input in HTTP headers. Validate and encode header values.",
+    "SSRF": "Validate and sanitize URLs. Use allowlists. Block internal IP ranges.",
+    "XXE": "Disable external entities in XML parsers. Use defusedxml or equivalent.",
+    "JWT": "Verify JWT signatures. Use strong algorithms (RS256). Set short expiry. Validate all claims.",
+    "Cache Poisoning": "Do not reflect unkeyed headers. Use cache keys properly. Add Vary header.",
+    "HPP": "Use single parameter values. Validate and sanitize all input parameters.",
+    "Cloud Metadata": "Block access to metadata endpoints. Use IMDSv2. Restrict network access.",
+    "OAuth": "Validate redirect_uri strictly. Use state parameter. Implement PKCE.",
+    "S3 Bucket": "Restrict bucket access. Enable ACL checks. Use IAM policies.",
+    "DNS Rebinding": "Validate Host header. Use DNS rebinding protection. Short TTL is a risk.",
+    "Open Redirect": "Validate redirect URLs against a whitelist.",
+}
+
+def get_confidence(finding):
+    """Determine confidence level for a vulnerability finding."""
+    evidence = finding.get("evidence", "").lower()
+    
+    # High confidence: direct evidence from live probe
+    if any(kw in evidence for kw in ("http 200", "http 403", "http 401", "exposed", "reflected",
+                                     "accepted", "verified", "detected", "found", "leaked")):
+        return "High"
+    # Medium confidence: indirect evidence
+    if any(kw in evidence for kw in ("missing", "weak", "no ", "below", "not ", "timeout")):
+        return "Medium"
+    # Low confidence: heuristic
+    return "Low"
+
+def get_remediation(finding):
+    """Get remediation suggestion for a vulnerability finding."""
+    title = finding.get("title", "").lower()
+    for key, rem in REMEDIATION_MAP.items():
+        if key.lower() in title:
+            return rem
+    # Fallback by category
+    cat = finding.get("category", "").lower()
+    if "tls" in cat or "ssl" in cat:
+        return "Update TLS configuration. Enable TLS 1.2/1.3, disable legacy protocols, use strong ciphers."
+    if "dns" in cat:
+        return "Review DNS configuration. Restrict zone transfers. Enable DNSSEC."
+    if "header" in cat:
+        return "Add missing security headers. Review OWASP Secure Headers Project for recommendations."
+    if "cookie" in cat:
+        return "Add Secure, HttpOnly, and SameSite attributes to all cookies."
+    if "information disclosure" in cat:
+        return "Remove sensitive information from responses. Configure server to not disclose version."
+    return "Review and remediate based on the specific finding."
+
+# ================= RESPONSE SIZE LIMITS =================
+MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+def _truncate_response(body, max_size=MAX_RESPONSE_SIZE):
+    """Truncate response body if it exceeds max size."""
+    if body and len(body) > max_size:
+        return body[:max_size] + f"\n... [truncated, original size: {len(body)} bytes]"
+    return body
+
 def main():
     global QUIET, STEALTH_MODE, THROTTLE_DELAY
     parser = argparse.ArgumentParser(
@@ -7359,6 +7520,7 @@ def main():
     parser.add_argument("--stealth", action="store_true", help="enable stealth mode (randomized delays)")
     parser.add_argument("--delay", type=float, default=0.0, help="delay between requests (seconds)")
     parser.add_argument("--proxy", help="HTTP/SOCKS proxy URL")
+    parser.add_argument("--verify-tls", action="store_true", help="enable TLS certificate verification for all requests")
     parser.add_argument("--proxy-list", help="file with proxy list (one per line)")
     parser.add_argument("--stealth", action="store_true", help="enable stealth mode (randomized delays)")
     parser.add_argument("--delay", type=float, default=0.0, help="delay between requests (seconds)")
@@ -7374,8 +7536,10 @@ def main():
         STEALTH_MODE = True
     if args.delay and args.delay > 0:
         THROTTLE_DELAY = args.delay
+    global VERIFY_TLS
+    if getattr(args, "verify_tls", False):
+        VERIFY_TLS = True
     if args.proxy:
-        os.environ["HTTP_PROXY"] = args.proxy
         os.environ["HTTPS_PROXY"] = args.proxy
         os.environ["http_proxy"] = args.proxy
         os.environ["https_proxy"] = args.proxy
