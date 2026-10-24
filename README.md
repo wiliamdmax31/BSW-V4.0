@@ -1,5 +1,5 @@
 
-![banner.png](assets/banner.png)
+![banner.png](https://github.com/wiliamdmax31/Recon-X-/blob/main/BX2%20webscanner.png?raw=true)
 
 
 ENG:
