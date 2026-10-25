@@ -62,8 +62,14 @@ python BXSW.py 8.8.8.8 --mode 2
 python BXSW.py username --mode 3
 ```
 
+
+
+
 ## Note
 Usage uniquement pour tests autorisés. OSINT public uniquement.
+![BXSW V4.0](https://github.com/wiliamdmax31/BSW-V4.0/blob/main/BSW-X2.png?raw=true)
+
+
 
 AR
 # BXSW V4.0
