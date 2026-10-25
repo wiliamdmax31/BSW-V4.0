@@ -1,4 +1,8 @@
-﻿ENG
+
+ # just Banner
+ ![BXSW V4.0](https://i.pinimg.com/736x/56/3d/7c/563d7c67ca1c1ea76568ef4514df48b5.jpg)
+ 
+ ENG
 # BXSW V4.0
 
 All-in-one CLI web recon framework for Windows, Linux, Termux, Pydroid3. 100% live probes, no fake data.
@@ -67,7 +71,6 @@ python BXSW.py username --mode 3
 
 ## Note
 Usage uniquement pour tests autorisés. OSINT public uniquement.
-![BXSW V4.0]([https://i.pinimg.com/736x/33/d2/19/33d21967e18bc32258cb5f89ef65b03b.jpg](https://i.pinimg.com/736x/56/3d/7c/563d7c67ca1c1ea76568ef4514df48b5.jpg))
 
 
 
