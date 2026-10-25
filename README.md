@@ -1,9 +1,5 @@
-
-![banner.png](https://github.com/wiliamdmax31/Recon-X-/blob/main/BSW-X2.png?raw=true)
-
-
 ENG:
-Recon-X v4.0 - Professional Web Reconnaissance Framework
+BXSW V4.0 v4.0 - Professional Web Reconnaissance Framework
 
 A comprehensive, CLI-only security reconnaissance tool that runs on Windows, Linux, Termux, and Pydroid3 (Android). Every value printed comes from a live probe - no fake or placeholder data.
 
@@ -28,12 +24,12 @@ Requirements:
 - Optional: requests, dnspython, cryptography (full fallback without them)
 
 Usage:
-  python reconx.py                          # interactive menu (Website Scan / IP Scanner)
-  python reconx.py example.com             # website scan
-  python reconx.py 8.8.8.8 --mode 2        # IP scanner
-  python reconx.py example.com --deep -o report.json
-  python reconx.py example.com --json-only > output.json
-  python reconx.py example.com --quick --threads 16
+  python BXSW.py                          # interactive menu (Website Scan / IP Scanner)
+  python BXSW.py example.com             # website scan
+  python BXSW.py 8.8.8.8 --mode 2        # IP scanner
+  python BXSW.py example.com --deep -o report.json
+  python BXSW.py example.com --json-only > output.json
+  python BXSW.py example.com --quick --threads 16
 
 Modules (50+):
   DNS (A/AAAA/MX/NS/TXT/CNAME/SOA/CAA + PTR + AXFR) | RDAP/WHOIS | Subdomain Enum (crt.sh + DNS brute-force)
@@ -48,11 +44,11 @@ Modules (50+):
   CORS Deep Testing | Sensitive Data Scanner | HTTP/2 Detection | Web Cache Deception
 
 License: For authorized security testing and educational purposes only.
-Author: Recon-X Development Team
+Author: BXSW V4.0 Development Team
 
 
 FR:
-Recon-X v4.0 - Framework Professionnel de Reconnaissance Web
+BXSW V4.0 v4.0 - Framework Professionnel de Reconnaissance Web
 
 Un outil de reconnaissance de securite complet, en ligne de commande uniquement, fonctionnant sur Windows, Linux, Termux et Pydroid3 (Android). Chaque valeur affichee provient d'une sonde en direct - aucune donnee fictive ou placeholder.
 
@@ -77,12 +73,12 @@ Prerequis:
 - Optionnel: requests, dnspython, cryptography (fallback complet sans eux)
 
 Utilisation:
-  python reconx.py                          # menu interactif (Scan Site / Scanner IP)
-  python reconx.py example.com             # scan de site web
-  python reconx.py 8.8.8.8 --mode 2        # scanner IP
-  python reconx.py example.com --deep -o report.json
-  python reconx.py example.com --json-only > output.json
-  python reconx.py example.com --quick --threads 16
+  python BXSW.py                          # menu interactif (Scan Site / Scanner IP)
+  python BXSW.py example.com             # scan de site web
+  python BXSW.py 8.8.8.8 --mode 2        # scanner IP
+  python BXSW.py example.com --deep -o report.json
+  python BXSW.py example.com --json-only > output.json
+  python BXSW.py example.com --quick --threads 16
 
 Modules (50+):
   DNS (A/AAAA/MX/NS/TXT/CNAME/SOA/CAA + PTR + AXFR) | RDAP/WHOIS | Enum Sous-domaines (crt.sh + brute-force DNS)
@@ -97,14 +93,11 @@ Modules (50+):
   Test CORS Approfondi | Scanner Donnees Sensibles | Detection HTTP/2 | Tromperie Cache Web
 
 Licence: Pour tests de securite autorises et usage educatif uniquement.
-Auteur: Equipe de Developpement Recon-X
-
-
-
+Auteur: Equipe de Developpement BXSW V4.0
 
 
 Ar:
-Recon-X v4.0 - إطار عمل احترافي لاستطلاع الويب
+BXSW V4.0 v4.0 - إطار عمل احترافي لاستطلاع الويب
 
 أداة استطلاع أمني شاملة، سطر أوامر فقط، تعمل على Windows و Linux و Termux و Pydroid3 (Android). كل قيمة مطبوعة تأتي من فحص حي (live probe) — لا بيانات وهمية أو placeholder.
 
@@ -129,12 +122,12 @@ Recon-X v4.0 - إطار عمل احترافي لاستطلاع الويب
 - اختياري: requests, dnspython, cryptography (fallback كامل بدونها)
 
 الاستخدام:
-  python reconx.py                          # قائمة تفاعلية (مسح موقع / ماسح IP)
-  python reconx.py example.com             # مسح موقع
-  python reconx.py 8.8.8.8 --mode 2        # ماسح IP
-  python reconx.py example.com --deep -o report.json
-  python reconx.py example.com --json-only > output.json
-  python reconx.py example.com --quick --threads 16
+  python BXSW.py                          # قائمة تفاعلية (مسح موقع / ماسح IP)
+  python BXSW.py example.com             # مسح موقع
+  python BXSW.py 8.8.8.8 --mode 2        # ماسح IP
+  python BXSW.py example.com --deep -o report.json
+  python BXSW.py example.com --json-only > output.json
+  python BXSW.py example.com --quick --threads 16
 
 الوحدات (50+):
   DNS (A/AAAA/MX/NS/TXT/CNAME/SOA/CAA + PTR + AXFR) | RDAP/WHOIS | تعداد النطاقات الفرعية (crt.sh + DNS brute-force)
@@ -149,4 +142,4 @@ Recon-X v4.0 - إطار عمل احترافي لاستطلاع الويب
   CORS Deep Testing | Sensitive Data Scanner | HTTP/2 Detection | Web Cache Deception
 
 الترخيص: لاختبارات أمنية مُصرّح بها وأغراض تعليمية فقط.
-المؤلف: فريق تطوير Recon-X
+المؤلف: فريق تطوير BXSW V4.0

@@ -7816,8 +7816,80 @@ SOCIAL_PLATFORMS = [
     ("dribbble.com", "Dribbble"),
 ]
 
+# ================= SOCIAL MEDIA OSINT (PUBLIC-ONLY / DEEP) =================
+SOCIAL_PLATFORMS = [
+    ("github.com", "GitHub"),
+    ("gitlab.com", "GitLab"),
+    ("bitbucket.org", "Bitbucket"),
+    ("x.com", "X / Twitter"),
+    ("twitter.com", "Twitter (legacy)"),
+    ("instagram.com", "Instagram"),
+    ("facebook.com", "Facebook"),
+    ("linkedin.com", "LinkedIn"),
+    ("reddit.com", "Reddit"),
+    ("tiktok.com", "TikTok"),
+    ("youtube.com", "YouTube"),
+    ("medium.com", "Medium"),
+    ("dev.to", "Dev.to"),
+    ("hashnode.com", "Hashnode"),
+    ("stackoverflow.com", "StackOverflow"),
+    ("superuser.com", "SuperUser"),
+    ("serverfault.com", "ServerFault"),
+    ("pinterest.com", "Pinterest"),
+    ("tumblr.com", "Tumblr"),
+    ("mastodon.social", "Mastodon"),
+    ("threads.net", "Threads"),
+    ("vk.com", "VK"),
+    ("telegram.me", "Telegram"),
+    ("t.me", "Telegram"),
+    ("soundcloud.com", "SoundCloud"),
+    ("spotify.com", "Spotify"),
+    ("behance.net", "Behance"),
+    ("dribbble.com", "Dribbble"),
+    ("codepen.io", "CodePen"),
+    ("replit.com", "Replit"),
+    ("huggingface.co", "HuggingFace"),
+    ("kaggle.com", "Kaggle"),
+    ("about.me", "About.me"),
+    ("gravatar.com", "Gravatar"),
+]
+
+def _extract_public_profile(html):
+    info = {}
+    try:
+        m = re.search(r"<title>([^<]{2,160})</title>", html, re.I)
+        if m:
+            info["title"] = m.group(1).strip()
+        m = re.search(r"<meta[^>]+name=[\"\']description[\"\'][^>]+content=[\"\']([^\"\']{5,300})[\"\']", html, re.I)
+        if m:
+            info["meta_description"] = m.group(1).strip()
+        m = re.search(r"<meta[^>]+property=[\"\']og:title[\"\'][^>]+content=[\"\']([^\"\']{2,160})[\"\']", html, re.I)
+        if m and not info.get("display_name"):
+            info["display_name"] = m.group(1).strip()
+        m = re.search(r"<meta[^>]+property=[\"\']og:description[\"\'][^>]+content=[\"\']([^\"\']{5,300})[\"\']", html, re.I)
+        if m and not info.get("bio"):
+            info["bio"] = m.group(1).strip()
+        m = re.search(r"<meta[^>]+property=[\"\']og:image[\"\'][^>]+content=[\"\']([^\"\']{10,500})[\"\']", html, re.I)
+        if m:
+            info["avatar"] = m.group(1).strip()
+        links = []
+        for lm in re.finditer(r'href=[\"\'](https?://[^\"\']{5,200})[\"\']', html):
+            lnk = lm.group(1)
+            if any(x in lnk for x in ["twitter.com","x.com","github.com","gitlab.com","linkedin.com","instagram.com","youtube.com","t.me","telegram","medium.com","dev.to","hashnode.com"]):
+                links.append(lnk)
+        seen=set()
+        ulinks=[]
+        for x in links:
+            if x not in seen:
+                ulinks.append(x); seen.add(x)
+        if ulinks:
+            info["public_links"] = ulinks[:15]
+    except Exception:
+        pass
+    return info
+
 def run_social_media(ctx, args):
-    p_section("Social Media OSINT (Public Only)", "★")
+    p_section("Social Media OSINT (Public-Only / Deep)", "★")
     ctx["modules_run"].append("social_media")
     target = ctx.get("target") or ""
     username = target.strip().lstrip("@").strip()
@@ -7825,30 +7897,53 @@ def run_social_media(ctx, args):
         try:
             p = urlparse(username)
             if p.netloc:
-                username = p.path.strip("/").split("/")[0]
-            else:
-                username = username.split("/")[-1]
+                parts = [x for x in p.path.strip("/").split("/") if x]
+                if parts:
+                    username = parts[0]
         except Exception:
             pass
     if not username or len(username) < 2:
         p_bad("Input", "No valid username/profile link provided")
-        ctx["social_media"] = {"query": target, "results": [], "count": 0}
+        ctx["social_media"] = {"query": target, "platform_results": [], "profile_intel": {}, "public_links": [], "cross_references": [], "archived_snapshots": [], "count": 0}
         return
     p_ok("Query", username)
     results = []
+    profile_intel = {}
+    public_links = []
+    cross_refs = []
+    archived = []
     ua = random.choice(UA_POOL) if UA_POOL else "Mozilla/5.0"
-    headers = {"User-Agent": ua, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+    headers = {"User-Agent": ua, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"}
     for domain, name in SOCIAL_PLATFORMS:
         url = f"https://{domain}/{username}"
         try:
             req = Request(url, headers=headers, method="GET")
             opener = build_opener()
-            resp = opener.open(req, timeout=6)
+            resp = opener.open(req, timeout=8)
             code = getattr(resp, "status", 200)
+            html = ""
+            try:
+                data = resp.read(200000)
+                try:
+                    html = data.decode("utf-8", errors="ignore")
+                except Exception:
+                    html = str(data)
+            except Exception:
+                html = ""
+            resp.close()
             if code in (200, 301, 302):
                 results.append({"platform": name, "domain": domain, "url": url, "status": "FOUND (Public)", "http": code})
                 p_ok(name, url)
-            resp.close()
+                if html:
+                    ext = _extract_public_profile(html)
+                    if ext:
+                        profile_intel[name] = ext
+                        for l in ext.get("public_links", []):
+                            if l not in public_links:
+                                public_links.append(l)
+            elif code == 403:
+                results.append({"platform": name, "domain": domain, "url": url, "status": "EXISTS (Protected)", "http": 403})
+                p_note(name, "Exists but access restricted (public endpoint)")
         except HTTPError as e:
             if e.code in (200, 301, 302):
                 results.append({"platform": name, "domain": domain, "url": url, "status": "FOUND (Public)", "http": e.code})
@@ -7856,14 +7951,36 @@ def run_social_media(ctx, args):
             elif e.code == 403:
                 results.append({"platform": name, "domain": domain, "url": url, "status": "EXISTS (Protected)", "http": 403})
                 p_note(name, "Exists but access restricted (public endpoint)")
-            elif e.code == 404:
-                pass
-            else:
-                pass
         except Exception:
             pass
-    ctx["social_media"] = {"query": username, "results": results, "count": len(results)}
+    cross_refs.append(f"https://web.archive.org/web/*/{username}")
+    cross_refs.append(f"https://search.brave.com/search?q=%22{username}%22")
+    cross_refs.append(f"https://www.google.com/search?q=%22{username}%22")
+    cross_refs.append(f"https://github.com/search?q={username}&type=users")
+    cross_refs.append(f"https://gitlab.com/search?search={username}&scope=users")
+    try:
+        way = f"https://web.archive.org/cdx/search/cdx?url=*/{username}&output=json&limit=12&fl=original,timestamp"
+        req2 = Request(way, headers={"User-Agent": ua}, method="GET")
+        opener2 = build_opener()
+        r2 = opener2.open(req2, timeout=7)
+        try:
+            jd = json.loads(r2.read(30000).decode("utf-8", errors="ignore"))
+            if isinstance(jd, list) and len(jd) > 1:
+                for row in jd[1:8]:
+                    if len(row) >= 2:
+                        ts = row[1]; orig = row[0]
+                        archived.append({"original": orig, "snapshot": f"https://web.archive.org/web/{ts}/{orig}"})
+        except Exception:
+            pass
+        r2.close()
+    except Exception:
+        pass
+    ctx["social_media"] = {"query": username, "platform_results": results, "profile_intel": profile_intel, "public_links": public_links, "cross_references": cross_refs, "archived_snapshots": archived, "count": len(results)}
     p_ok("Public Profiles Found", len(results))
+    p_ok("Profiles With Public Intel", len(profile_intel))
+    p_ok("Public Cross-References", len(cross_refs))
+    p_ok("Archived Public Snapshots", len(archived))
+
 
 
 def main():
