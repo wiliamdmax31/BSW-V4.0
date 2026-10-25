@@ -1,3 +1,5 @@
+
+
 ENG:
 BXSW V4.0 v4.0 - Professional Web Reconnaissance Framework
 
@@ -46,6 +48,9 @@ Modules (50+):
 License: For authorized security testing and educational purposes only.
 Author: BXSW V4.0 Development Team
 
+<p align="center">
+  <img src="" />
+</p>
 
 FR:
 BXSW V4.0 v4.0 - Framework Professionnel de Reconnaissance Web
