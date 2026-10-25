@@ -1,6 +1,6 @@
 
  # just Banner
- ![BXSW V4.0]([https://pin.it/O0zimEZ9Z](https://i.pinimg.com/736x/5e/f7/1d/5ef71d0b76a380dbcfff0c9850d9b36b.jpg))
+ ![BXSW V4.0](https://i.pinimg.com/736x/5e/f7/1d/5ef71d0b76a380dbcfff0c9850d9b36b.jpg)
  
  ENG
 # BXSW V4.0
