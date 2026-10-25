@@ -48,9 +48,7 @@ Modules (50+):
 License: For authorized security testing and educational purposes only.
 Author: BXSW V4.0 Development Team
 
-<p align="center">
-  <img src="<img width="1670" height="942" alt="image" src="https://github.com/user-attachments/assets/918cd2f0-d9ba-4772-872f-603014bd4f72" />" />
-</p>
+<img src="./images/screenshot.png"
 
 FR:
 BXSW V4.0 v4.0 - Framework Professionnel de Reconnaissance Web
