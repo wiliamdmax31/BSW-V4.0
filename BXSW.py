@@ -83,6 +83,28 @@ def _color_enabled():
 USE_COLOR = _color_enabled()
 QUIET = False          # --json-only : everything except the JSON goes to stderr
 
+def _sm_progress(done, total, msg="Searching"):
+    if QUIET:
+        return
+    if total <= 0:
+        total = 1
+    pct = int((done / total) * 100)
+    if pct > 100:
+        pct = 100
+    filled = int(pct / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+    try:
+        sys.stderr.write(f"\r  [{C.G if USE_COLOR else ''}SEARCH{C.RST if USE_COLOR else ''}] [{bar}] {pct}% | {msg[:40]}")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    if done >= total:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
 # ================= BOOT SEQUENCE =================
 BOOT_FRAMES = [
     (r"""
@@ -766,24 +788,69 @@ SERVICE_MAP = {
 
 def tcp_probe(host, port, timeout=1.5):
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
+        sck = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sck.settimeout(timeout)
+        try:
+            res = sck.connect_ex((host, port))
+            if res == 0:
+                # quick verify - try to read nothing or just confirm
+                sck.settimeout(max(0.5, timeout/2))
+                try:
+                    sck.send(b"\r\n")
+                    sck.recv(1)
+                except Exception:
+                    pass
+                sck.close()
+                return True
+            sck.close()
+            return False
+        except Exception:
+            try:
+                sck.close()
+            except Exception:
+                pass
+            return False
     except Exception:
         return False
 
-def port_scan(host, ports=None, timeout=1.5, workers=48):
-    """Live TCP connect scan."""
+def port_scan(host, ports=None, timeout=2.0, workers=24):
+    """Live TCP connect scan with strict verification."""
     ports = list(ports or COMMON_PORTS)
-    found = []
+    found = set()
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(tcp_probe, host, p, timeout): p for p in ports}
         for fut in as_completed(futures):
             port = futures[fut]
             try:
-                if fut.result():
-                    found.append(port)
+                if not fut.result():
+                    continue
             except Exception:
-                pass
+                continue
+            # verify again
+            try:
+                s2c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s2c.settimeout(2.5)
+                r2 = s2c.connect_ex((host, port))
+                if r2 != 0:
+                    try:
+                        s2c.close()
+                    except Exception:
+                        pass
+                    continue
+                # confirm by trying to read/write briefly
+                try:
+                    s2c.settimeout(1.0)
+                    s2c.send(b"\x00")
+                    s2c.recv(16)
+                except Exception:
+                    pass
+                try:
+                    s2c.close()
+                except Exception:
+                    pass
+                found.add(port)
+            except Exception:
+                continue
     return sorted(found)
 
 TLS_PORTS = {443, 4443, 8443, 9443, 10443}
@@ -2924,6 +2991,29 @@ def run_ports(ctx, host, args):
     ctx["open_ports"] = open_ports
     if not open_ports:
         p_note("Ports", "no open ports found")
+        return
+    verified = []
+    for p in open_ports:
+        ok_cnt = 0
+        for _ in range(2):
+            try:
+                s3c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s3c.settimeout(2.5)
+                r3 = s3c.connect_ex((host, p))
+                if r3 == 0:
+                    ok_cnt += 1
+                try:
+                    s3c.close()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        if ok_cnt >= 2:
+            verified.append(p)
+    open_ports = sorted(set(verified))
+    ctx["open_ports"] = open_ports
+    if not open_ports:
+        p_note("Ports", "no open ports found after strict verification")
         return
     for p in open_ports:
         svc = SERVICE_MAP.get(p, "unknown")
@@ -7888,99 +7978,524 @@ def _extract_public_profile(html):
         pass
     return info
 
+# ================= SOCIAL MEDIA OSINT (PUBLIC-ONLY / ULTRA DEEP) =================
+SOCIAL_PLATFORMS = [
+    ("github.com", "GitHub"),
+    ("gitlab.com", "GitLab"),
+    ("bitbucket.org", "Bitbucket"),
+    ("x.com", "X / Twitter"),
+    ("twitter.com", "Twitter (legacy)"),
+    ("instagram.com", "Instagram"),
+    ("facebook.com", "Facebook"),
+    ("linkedin.com", "LinkedIn"),
+    ("reddit.com", "Reddit"),
+    ("tiktok.com", "TikTok"),
+    ("youtube.com", "YouTube"),
+    ("medium.com", "Medium"),
+    ("dev.to", "Dev.to"),
+    ("hashnode.com", "Hashnode"),
+    ("stackoverflow.com", "StackOverflow"),
+    ("superuser.com", "SuperUser"),
+    ("serverfault.com", "ServerFault"),
+    ("pinterest.com", "Pinterest"),
+    ("tumblr.com", "Tumblr"),
+    ("mastodon.social", "Mastodon"),
+    ("threads.net", "Threads"),
+    ("bsky.app", "Bluesky"),
+    ("vk.com", "VK"),
+    ("ok.ru", "OK.ru"),
+    ("telegram.me", "Telegram"),
+    ("t.me", "Telegram"),
+    ("soundcloud.com", "SoundCloud"),
+    ("spotify.com", "Spotify"),
+    ("mixcloud.com", "Mixcloud"),
+    ("behance.net", "Behance"),
+    ("dribbble.com", "Dribbble"),
+    ("codepen.io", "CodePen"),
+    ("replit.com", "Replit"),
+    ("huggingface.co", "HuggingFace"),
+    ("kaggle.com", "Kaggle"),
+    ("about.me", "About.me"),
+    ("gravatar.com", "Gravatar"),
+    ("linktr.ee", "Linktree"),
+    ("carrd.co", "Carrd"),
+    ("pages.dev", "Cloudflare Pages"),
+]
+
+def _extract_public_profile(html):
+    info = {}
+    try:
+        m = re.search(r"<title>([^<]{2,200})</title>", html, re.I)
+        if m:
+            info["title"] = re.sub(r"\s+", " ", m.group(1)).strip()
+        for pat in [r"<meta[^>]+name=[\"\']description[\"\'][^>]+content=[\"\']([^\"\']{5,400})[\"\']",
+                    r"<meta[^>]+property=[\"\']og:description[\"\'][^>]+content=[\"\']([^\"\']{5,400})[\"\']",
+                    r"<meta[^>]+property=[\"\']twitter:description[\"\'][^>]+content=[\"\']([^\"\']{5,400})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("bio"):
+                info["bio"] = re.sub(r"\s+", " ", m.group(1)).strip()
+                break
+        for pat in [r"<meta[^>]+property=[\"\']og:title[\"\'][^>]+content=[\"\']([^\"\']{2,200})[\"\']",
+                    r"<meta[^>]+property=[\"\']twitter:title[\"\'][^>]+content=[\"\']([^\"\']{2,200})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("display_name"):
+                info["display_name"] = re.sub(r"\s+", " ", m.group(1)).strip()
+                break
+        for pat in [r"<meta[^>]+property=[\"\']og:image[\"\'][^>]+content=[\"\']([^\"\']{10,600})[\"\']",
+                    r"<meta[^>]+property=[\"\']twitter:image[\"\'][^>]+content=[\"\']([^\"\']{10,600})[\"\']",
+                    r"<link[^>]+rel=[\"\']icon[\"\'][^>]+href=[\"\']([^\"\']{10,600})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("avatar"):
+                info["avatar"] = m.group(1).strip()
+                break
+        # public links
+        links = []
+        for lm in re.finditer(r'href=[\"\'](https?://[^\"\']{5,400})[\"\']', html):
+            lnk = lm.group(1)
+            if any(x in lnk.lower() for x in ["github.com","gitlab.com","linkedin.com","x.com","twitter.com","instagram.com","youtube.com","t.me","telegram","medium.com","dev.to","hashnode.com","linktr.ee","about.me","kaggle.com","huggingface.co","reddit.com","behance.net","dribbble.com"]):
+                links.append(lnk)
+        # dedup
+        seen=set(); u=[]
+        for x in links:
+            if x not in seen:
+                u.append(x); seen.add(x)
+        if u: info["public_links"] = u[:20]
+        # possible location hints
+        m = re.search(r'([A-Za-z][A-Za-z\s]{2,30}),\s*([A-Z]{2}|[A-Za-z]{3,20})', html)
+        if m and not info.get("location_hint"):
+            info["location_hint"] = m.group(0).strip()
+    except Exception:
+        pass
+    return info
+
+# ================= SOCIAL MEDIA OSINT (PUBLIC-ONLY / ULTRA DEEP - REAL) =================
+SOCIAL_PLATFORMS = [
+    ("github.com", "GitHub"),
+    ("gitlab.com", "GitLab"),
+    ("bitbucket.org", "Bitbucket"),
+    ("x.com", "X / Twitter"),
+    ("twitter.com", "Twitter (legacy)"),
+    ("instagram.com", "Instagram"),
+    ("facebook.com", "Facebook"),
+    ("linkedin.com", "LinkedIn"),
+    ("reddit.com", "Reddit"),
+    ("tiktok.com", "TikTok"),
+    ("youtube.com", "YouTube"),
+    ("medium.com", "Medium"),
+    ("dev.to", "Dev.to"),
+    ("hashnode.com", "Hashnode"),
+    ("stackoverflow.com", "StackOverflow"),
+    ("superuser.com", "SuperUser"),
+    ("serverfault.com", "ServerFault"),
+    ("pinterest.com", "Pinterest"),
+    ("tumblr.com", "Tumblr"),
+    ("mastodon.social", "Mastodon"),
+    ("threads.net", "Threads"),
+    ("bsky.app", "Bluesky"),
+    ("vk.com", "VK"),
+    ("ok.ru", "OK.ru"),
+    ("telegram.me", "Telegram"),
+    ("t.me", "Telegram"),
+    ("soundcloud.com", "SoundCloud"),
+    ("spotify.com", "Spotify"),
+    ("mixcloud.com", "Mixcloud"),
+    ("behance.net", "Behance"),
+    ("dribbble.com", "Dribbble"),
+    ("codepen.io", "CodePen"),
+    ("replit.com", "Replit"),
+    ("huggingface.co", "HuggingFace"),
+    ("kaggle.com", "Kaggle"),
+    ("about.me", "About.me"),
+    ("gravatar.com", "Gravatar"),
+    ("linktr.ee", "Linktree"),
+    ("carrd.co", "Carrd"),
+]
+
+def _deep_extract(html, url=""):
+    info = {}
+    try:
+        for pat in [r"<title>([^<]{2,220})</title>", r"<meta[^>]+property=[\"\']og:title[\"\'][^>]+content=[\"\']([^\"\']{2,220})[\"\']", r"<meta[^>]+name=[\"\']twitter:title[\"\'][^>]+content=[\"\']([^\"\']{2,220})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("display_name"):
+                info["display_name"] = re.sub(r"\s+", " ", m.group(1)).strip()
+                break
+        for pat in [r"<meta[^>]+name=[\"\']description[\"\'][^>]+content=[\"\']([^\"\']{5,500})[\"\']", r"<meta[^>]+property=[\"\']og:description[\"\'][^>]+content=[\"\']([^\"\']{5,500})[\"\']", r"<meta[^>]+name=[\"\']twitter:description[\"\'][^>]+content=[\"\']([^\"\']{5,500})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("bio"):
+                info["bio"] = re.sub(r"\s+", " ", m.group(1)).strip()
+                break
+        for pat in [r"<meta[^>]+property=[\"\']og:image[\"\'][^>]+content=[\"\']([^\"\']{10,800})[\"\']", r"<meta[^>]+name=[\"\']twitter:image[\"\'][^>]+content=[\"\']([^\"\']{10,800})[\"\']", r"<img[^>]+class=[\"\'][^\"\']*avatar[^\"\']*[\"\'][^>]+src=[\"\']([^\"\']{10,800})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("profile_picture"):
+                info["profile_picture"] = m.group(1).strip()
+                break
+        # JSON-LD
+        for jm in re.finditer(r'<script[^>]+type=[\"\']application/ld\+json[\"\'][^>]*>(.*?)</script>', html, re.S|re.I):
+            try:
+                jtxt = jm.group(1)
+                jd = json.loads(jtxt)
+                if isinstance(jd, dict):
+                    for k in ["name","alternateName","description","url","sameAs","location","homeLocation"]:
+                        if jd.get(k) and k not in info:
+                            info[k] = jd.get(k)
+                elif isinstance(jd, list):
+                    for it in jd:
+                        if isinstance(it, dict):
+                            for k in ["name","alternateName","description","url","sameAs"]:
+                                if it.get(k) and k not in info:
+                                    info[k] = it.get(k)
+            except Exception:
+                pass
+        # links
+        links = []
+        for lm in re.finditer(r'href=[\"\'](https?://[^\"\']{5,600})[\"\']', html, re.I):
+            lnk = lm.group(1)
+            if any(x in lnk.lower() for x in ["github.com","gitlab.com","linkedin.com","x.com","twitter.com","instagram.com","youtube.com","t.me","telegram","medium.com","dev.to","hashnode.com","linktr.ee","beacons.ai","solo.to","bio.link","reddit.com","pinterest.com","behance.net","dribbble.com","kaggle.com","huggingface.co"]):
+                links.append(lnk)
+        seen=set(); u=[]
+        for x in links:
+            if x not in seen:
+                u.append(x); seen.add(x)
+        if u: info["linked_accounts_public"] = u[:25]
+        if url: info["source_url"] = url
+    except Exception:
+        pass
+    return info
+
+# ================= SOCIAL MEDIA OSINT (PUBLIC-ONLY / DIRECT SCAN) =================
+SOCIAL_PLATFORMS = [
+    ("github.com", "GitHub"),
+    ("gitlab.com", "GitLab"),
+    ("bitbucket.org", "Bitbucket"),
+    ("x.com", "X / Twitter"),
+    ("twitter.com", "Twitter (legacy)"),
+    ("instagram.com", "Instagram"),
+    ("facebook.com", "Facebook"),
+    ("linkedin.com", "LinkedIn"),
+    ("reddit.com", "Reddit"),
+    ("tiktok.com", "TikTok"),
+    ("youtube.com", "YouTube"),
+    ("medium.com", "Medium"),
+    ("dev.to", "Dev.to"),
+    ("hashnode.com", "Hashnode"),
+    ("stackoverflow.com", "StackOverflow"),
+    ("pinterest.com", "Pinterest"),
+    ("tumblr.com", "Tumblr"),
+    ("mastodon.social", "Mastodon"),
+    ("threads.net", "Threads"),
+    ("bsky.app", "Bluesky"),
+    ("vk.com", "VK"),
+    ("telegram.me", "Telegram"),
+    ("t.me", "Telegram"),
+    ("soundcloud.com", "SoundCloud"),
+    ("spotify.com", "Spotify"),
+    ("behance.net", "Behance"),
+    ("dribbble.com", "Dribbble"),
+    ("codepen.io", "CodePen"),
+    ("replit.com", "Replit"),
+    ("huggingface.co", "HuggingFace"),
+    ("kaggle.com", "Kaggle"),
+    ("about.me", "About.me"),
+    ("gravatar.com", "Gravatar"),
+    ("linktr.ee", "Linktree"),
+    ("beacons.ai", "Beacons"),
+    ("solo.to", "Solo.to"),
+    ("bio.link", "Bio.link"),
+]
+
+def _sm_extract_deep(html, url=""):
+    info = {}
+    try:
+        for pat in [r"<title>([^<]{2,250})</title>", r"<meta[^>]+property=[\"\']og:title[\"\'][^>]+content=[\"\']([^\"\']{2,250})[\"\']", r"<meta[^>]+name=[\"\']twitter:title[\"\'][^>]+content=[\"\']([^\"\']{2,250})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("display_name"):
+                info["display_name"] = re.sub(r"\s+", " ", m.group(1)).strip()
+                break
+        for pat in [r"<meta[^>]+name=[\"\']description[\"\'][^>]+content=[\"\']([^\"\']{5,600})[\"\']", r"<meta[^>]+property=[\"\']og:description[\"\'][^>]+content=[\"\']([^\"\']{5,600})[\"\']", r"<meta[^>]+name=[\"\']twitter:description[\"\'][^>]+content=[\"\']([^\"\']{5,600})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("bio"):
+                info["bio"] = re.sub(r"\s+", " ", m.group(1)).strip()
+                break
+        for pat in [r"<meta[^>]+property=[\"\']og:image[\"\'][^>]+content=[\"\']([^\"\']{10,900})[\"\']", r"<meta[^>]+name=[\"\']twitter:image[\"\'][^>]+content=[\"\']([^\"\']{10,900})[\"\']", r"<img[^>]+class=[\"\'][^\"\']*profile[^\"\']*[\"\'][^>]+src=[\"\']([^\"\']{10,900})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("profile_picture"):
+                info["profile_picture"] = m.group(1).strip()
+                break
+        for jm in re.finditer(r'<script[^>]+type=[\"\']application/ld\+json[\"\'][^>]*>(.*?)</script>', html, re.S|re.I):
+            try:
+                jd = json.loads(jm.group(1))
+                stack = [jd] if isinstance(jd, (dict,list)) else []
+                while stack:
+                    cur = stack.pop()
+                    if isinstance(cur, dict):
+                        for k in ["name","alternateName","description","url","sameAs","nickname","username"]:
+                            if cur.get(k) and k not in info:
+                                info[k] = cur.get(k)
+                        for v in cur.values():
+                            if isinstance(v,(dict,list)): stack.append(v)
+                    elif isinstance(cur, list):
+                        stack.extend(cur)
+            except Exception:
+                pass
+        links=[]
+        for lm in re.finditer(r'href=[\"\'](https?://[^\"\']{5,700})[\"\']', html, re.I):
+            lnk = lm.group(1)
+            if any(x in lnk.lower() for x in ["github.com","gitlab.com","linkedin.com","x.com","twitter.com","instagram.com","youtube.com","t.me","telegram.me","medium.com","dev.to","hashnode.com","linktr.ee","beacons.ai","solo.to","bio.link","reddit.com","pinterest.com","behance.net","dribbble.com","kaggle.com","huggingface.co","bsky.app","threads.net","tiktok.com"]):
+                links.append(lnk)
+        seen=set(); ul=[]
+        for x in links:
+            if x not in seen:
+                ul.append(x); seen.add(x)
+        if ul: info["other_platforms"] = ul[:30]
+        if url: info["fetched_from"] = url
+    except Exception:
+        pass
+    return info
+
+# ================= SOCIAL MEDIA OSINT (PUBLIC-ONLY / DEEP INTEL) =================
+SOCIAL_PLATFORMS = [
+    ("github.com", "GitHub"),
+    ("gitlab.com", "GitLab"),
+    ("bitbucket.org", "Bitbucket"),
+    ("x.com", "X / Twitter"),
+    ("twitter.com", "Twitter (legacy)"),
+    ("instagram.com", "Instagram"),
+    ("facebook.com", "Facebook"),
+    ("linkedin.com", "LinkedIn"),
+    ("reddit.com", "Reddit"),
+    ("tiktok.com", "TikTok"),
+    ("youtube.com", "YouTube"),
+    ("medium.com", "Medium"),
+    ("dev.to", "Dev.to"),
+    ("hashnode.com", "Hashnode"),
+    ("stackoverflow.com", "StackOverflow"),
+    ("superuser.com", "SuperUser"),
+    ("serverfault.com", "ServerFault"),
+    ("pinterest.com", "Pinterest"),
+    ("tumblr.com", "Tumblr"),
+    ("mastodon.social", "Mastodon"),
+    ("threads.net", "Threads"),
+    ("bsky.app", "Bluesky"),
+    ("vk.com", "VK"),
+    ("telegram.me", "Telegram"),
+    ("t.me", "Telegram"),
+    ("soundcloud.com", "SoundCloud"),
+    ("spotify.com", "Spotify"),
+    ("behance.net", "Behance"),
+    ("dribbble.com", "Dribbble"),
+    ("codepen.io", "CodePen"),
+    ("replit.com", "Replit"),
+    ("huggingface.co", "HuggingFace"),
+    ("kaggle.com", "Kaggle"),
+    ("about.me", "About.me"),
+    ("gravatar.com", "Gravatar"),
+    ("linktr.ee", "Linktree"),
+    ("beacons.ai", "Beacons"),
+    ("solo.to", "Solo.to"),
+    ("bio.link", "Bio.link"),
+]
+
+def _sm_deep(html, url=""):
+    info = {}
+    evidence = {}
+    try:
+        for pat in [r"<title>([^<]{2,300})</title>", r"<meta[^>]+property=[\"\']og:title[\"\'][^>]+content=[\"\']([^\"\']{2,300})[\"\']", r"<meta[^>]+name=[\"\']twitter:title[\"\'][^>]+content=[\"\']([^\"\']{2,300})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("display_name"):
+                val = re.sub(r"\s+", " ", m.group(1)).strip()
+                info["display_name"] = val
+                evidence["display_name"] = m.group(0)[:160]
+                break
+        for pat in [r"<meta[^>]+name=[\"\']description[\"\'][^>]+content=[\"\']([^\"\']{5,800})[\"\']", r"<meta[^>]+property=[\"\']og:description[\"\'][^>]+content=[\"\']([^\"\']{5,800})[\"\']", r"<meta[^>]+name=[\"\']twitter:description[\"\'][^>]+content=[\"\']([^\"\']{5,800})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("bio"):
+                val = re.sub(r"\s+", " ", m.group(1)).strip()
+                info["bio"] = val
+                evidence["bio"] = m.group(0)[:200]
+                break
+        for pat in [r"<meta[^>]+property=[\"\']og:image[\"\'][^>]+content=[\"\']([^\"\']{10,1000})[\"\']", r"<meta[^>]+name=[\"\']twitter:image[\"\'][^>]+content=[\"\']([^\"\']{10,1000})[\"\']"]:
+            m = re.search(pat, html, re.I)
+            if m and not info.get("profile_picture"):
+                val = m.group(1).strip()
+                info["profile_picture"] = val
+                evidence["profile_picture"] = m.group(0)[:160]
+                break
+        for jm in re.finditer(r'<script[^>]+type=[\"\']application/ld\+json[\"\'][^>]*>(.*?)</script>', html, re.S|re.I):
+            try:
+                jd = json.loads(jm.group(1))
+                stack = [jd]
+                while stack:
+                    cur = stack.pop()
+                    if isinstance(cur, dict):
+                        for k in ["name","alternateName","givenName","familyName","email","url","sameAs","description","nickname","username"]:
+                            if cur.get(k) and k not in info and isinstance(cur.get(k),(str,list)):
+                                info[k] = cur.get(k)
+                        for v in cur.values():
+                            if isinstance(v,(dict,list)): stack.append(v)
+                    elif isinstance(cur, list):
+                        stack.extend(cur)
+                evidence["json_ld"] = "found"
+            except Exception:
+                pass
+        emails=[]
+        for em in re.finditer(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', html):
+            s_em = em.group(0).lower()
+            if any(x in s_em for x in ["example.com","test.com"]):
+                continue
+            if s_em not in emails:
+                emails.append(em.group(0))
+        if emails:
+            info["emails_public_visible"] = emails[:10]
+            evidence["emails_public_visible"] = "found_in_raw_html"
+        links=[]
+        for lm in re.finditer(r'href=[\"\'](https?://[^\"\']{5,800})[\"\']', html, re.I):
+            lnk = lm.group(1)
+            if any(x in lnk.lower() for x in ["github.com","gitlab.com","linkedin.com","x.com","twitter.com","instagram.com","youtube.com","t.me","telegram.me","medium.com","dev.to","hashnode.com","linktr.ee","beacons.ai","solo.to","bio.link","reddit.com","pinterest.com","behance.net","dribbble.com","kaggle.com","huggingface.co","bsky.app","threads.net","tiktok.com","facebook.com"]):
+                links.append(lnk)
+        seen=set(); ul=[]
+        for x in links:
+            if x not in seen:
+                ul.append(x); seen.add(x)
+        if ul: info["other_platforms_public"] = ul[:40]
+        if url: info["source_url"] = url
+        if evidence:
+            info["_evidence"] = evidence
+        info["_confidence"] = "CONFIRMED" if len(info) > 2 else "HINT"
+    except Exception:
+        pass
+    return info
+
 def run_social_media(ctx, args):
-    p_section("Social Media OSINT (Public-Only / Deep)", "★")
+    p_section("Social Media OSINT (Public-Only / Direct Intel)", "★")
     ctx["modules_run"].append("social_media")
     target = ctx.get("target") or ""
-    username = target.strip().lstrip("@").strip()
-    if "/" in username or username.startswith("http"):
+    if not target:
         try:
-            p = urlparse(username)
+            sys.stderr.buffer.write(c("\n   Enter Username or Full Profile URL: ", C.BOLD + C.W).encode("utf-8"))
+            sys.stderr.buffer.flush()
+            target = input().strip()
+        except Exception:
+            return
+    raw = target.strip()
+    username = raw.lstrip("@").strip()
+    direct_url = ""
+    if raw.lower().startswith("http"):
+        direct_url = raw
+        try:
+            p = urlparse(raw)
             if p.netloc:
-                parts = [x for x in p.path.strip("/").split("/") if x]
+                parts = [x for x in p.path.strip("/").split("/") if x and x.lower() not in ("p","profile","user","users","people","channel","c","search")]
                 if parts:
-                    username = parts[0]
+                    username = parts[-1].lstrip("@")
         except Exception:
             pass
-    if not username or len(username) < 2:
-        p_bad("Input", "No valid username/profile link provided")
-        ctx["social_media"] = {"query": target, "platform_results": [], "profile_intel": {}, "public_links": [], "cross_references": [], "archived_snapshots": [], "count": 0}
-        return
-    p_ok("Query", username)
-    results = []
-    profile_intel = {}
-    public_links = []
-    cross_refs = []
-    archived = []
-    ua = random.choice(UA_POOL) if UA_POOL else "Mozilla/5.0"
+    elif "/" in username:
+        try:
+            parts = [x for x in username.strip("/").split("/") if x]
+            if parts: username = parts[-1].lstrip("@")
+        except Exception:
+            pass
+    p_ok("Target", raw)
+    p_ok("Username", username)
+    ua = random.choice(UA_POOL) if UA_POOL else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     headers = {"User-Agent": ua, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"}
-    for domain, name in SOCIAL_PLATFORMS:
+    results=[]
+    profile_intel={}
+    linked=[]
+    cross=[]
+    archived=[]
+    if direct_url:
+        _sm_progress(0, 100, "Fetching direct profile")
+        try:
+            req = Request(direct_url, headers=headers, method="GET")
+            opener = build_opener()
+            resp = opener.open(req, timeout=16)
+            code = getattr(resp,"status",200)
+            html=""
+            try:
+                data = resp.read(800000)
+                html = data.decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            resp.close()
+            _sm_progress(70, 100, "Deep extracting public data")
+            if code in (200,301,302) and html and len(html)>120:
+                ext = _sm_deep(html, direct_url)
+                if ext and len(ext)>1:
+                    profile_intel["DIRECT_PROFILE"] = ext
+                    for l in ext.get("other_platforms",[]):
+                        if l not in linked: linked.append(l)
+                results.append({"platform": urlparse(direct_url).netloc, "url": direct_url, "status": "DIRECT_PUBLIC_FETCH_OK", "http": code})
+                p_ok("Direct Profile", direct_url)
+            else:
+                p_note("Direct Profile", f"HTTP {code}")
+        except Exception as e:
+            p_bad("Direct Fetch", str(e)[:70])
+        _sm_progress(100, 100, "Done")
+    total = len(SOCIAL_PLATFORMS)
+    done=0
+    _sm_progress(0, total, "Scanning platforms")
+    for domain,name in SOCIAL_PLATFORMS:
+        done+=1
+        _sm_progress(done, total, f"Checking {name}")
         url = f"https://{domain}/{username}"
         try:
             req = Request(url, headers=headers, method="GET")
             opener = build_opener()
-            resp = opener.open(req, timeout=8)
-            code = getattr(resp, "status", 200)
-            html = ""
+            resp = opener.open(req, timeout=11)
+            code = getattr(resp,"status",200)
+            html=""
             try:
-                data = resp.read(200000)
-                try:
-                    html = data.decode("utf-8", errors="ignore")
-                except Exception:
-                    html = str(data)
+                data = resp.read(400000)
+                html = data.decode("utf-8", errors="ignore")
             except Exception:
-                html = ""
+                pass
             resp.close()
-            if code in (200, 301, 302):
+            if code in (200,301,302) and html and len(html)>100:
                 results.append({"platform": name, "domain": domain, "url": url, "status": "FOUND (Public)", "http": code})
                 p_ok(name, url)
-                if html:
-                    ext = _extract_public_profile(html)
-                    if ext:
-                        profile_intel[name] = ext
-                        for l in ext.get("public_links", []):
-                            if l not in public_links:
-                                public_links.append(l)
-            elif code == 403:
+                ext = _sm_deep(html, url)
+                if ext and len(ext)>1:
+                    profile_intel[f"{name} ({domain})"] = ext
+                    for l in ext.get("other_platforms",[]):
+                        if l not in linked: linked.append(l)
+            elif code==403:
                 results.append({"platform": name, "domain": domain, "url": url, "status": "EXISTS (Protected)", "http": 403})
-                p_note(name, "Exists but access restricted (public endpoint)")
+                p_note(name,"Exists but restricted")
         except HTTPError as e:
-            if e.code in (200, 301, 302):
+            if e.code in (200,301,302):
                 results.append({"platform": name, "domain": domain, "url": url, "status": "FOUND (Public)", "http": e.code})
-                p_ok(name, url)
-            elif e.code == 403:
+                p_ok(name,url)
+            elif e.code==403:
                 results.append({"platform": name, "domain": domain, "url": url, "status": "EXISTS (Protected)", "http": 403})
-                p_note(name, "Exists but access restricted (public endpoint)")
         except Exception:
             pass
-    cross_refs.append(f"https://web.archive.org/web/*/{username}")
-    cross_refs.append(f"https://search.brave.com/search?q=%22{username}%22")
-    cross_refs.append(f"https://www.google.com/search?q=%22{username}%22")
-    cross_refs.append(f"https://github.com/search?q={username}&type=users")
-    cross_refs.append(f"https://gitlab.com/search?search={username}&scope=users")
+    _sm_progress(total,total,"Finalizing")
+    cross.append(f"https://search.brave.com/search?q=%22{username}%22")
+    cross.append(f"https://www.google.com/search?q=%22{username}%22")
+    cross.append(f"https://duckduckgo.com/?q=%22{username}%22")
+    cross.append(f"https://github.com/search?q={username}&type=users")
+    cross.append(f"https://gitlab.com/search?search={username}&scope=users")
+    cross.append(f"https://www.reddit.com/search/?q={username}")
     try:
-        way = f"https://web.archive.org/cdx/search/cdx?url=*/{username}&output=json&limit=12&fl=original,timestamp"
-        req2 = Request(way, headers={"User-Agent": ua}, method="GET")
+        way = f"https://web.archive.org/cdx/search/cdx?url=*/{username}&output=json&limit=25&fl=original,timestamp"
+        req2 = Request(way, headers={"User-Agent":ua}, method="GET")
         opener2 = build_opener()
-        r2 = opener2.open(req2, timeout=7)
-        try:
-            jd = json.loads(r2.read(30000).decode("utf-8", errors="ignore"))
-            if isinstance(jd, list) and len(jd) > 1:
-                for row in jd[1:8]:
-                    if len(row) >= 2:
-                        ts = row[1]; orig = row[0]
-                        archived.append({"original": orig, "snapshot": f"https://web.archive.org/web/{ts}/{orig}"})
-        except Exception:
-            pass
+        r2 = opener2.open(req2, timeout=10)
+        jd = json.loads(r2.read(80000).decode("utf-8",errors="ignore"))
+        if isinstance(jd,list) and len(jd)>1:
+            for row in jd[1:15]:
+                if len(row)>=2:
+                    archived.append({"original":row[0],"timestamp":row[1],"snapshot":f"https://web.archive.org/web/{row[1]}/{row[0]}"})
         r2.close()
     except Exception:
         pass
-    ctx["social_media"] = {"query": username, "platform_results": results, "profile_intel": profile_intel, "public_links": public_links, "cross_references": cross_refs, "archived_snapshots": archived, "count": len(results)}
+    ctx["social_media"] = {"query": username, "input": raw, "direct_url": direct_url or None, "platform_results": results, "profile_intel": profile_intel, "linked_accounts_public": linked, "cross_references": cross, "archived_snapshots": archived, "count": len(results)}
     p_ok("Public Profiles Found", len(results))
-    p_ok("Profiles With Public Intel", len(profile_intel))
-    p_ok("Public Cross-References", len(cross_refs))
-    p_ok("Archived Public Snapshots", len(archived))
-
+    p_ok("Direct/Public Intel", len(profile_intel))
+    p_ok("Linked Public Accounts", len(linked))
+    p_ok("Public Emails Found", sum(1 for v in profile_intel.values() if isinstance(v,dict) and v.get("emails_public")))
+    p_ok("Archived Snapshots", len(archived))
 
 
 def main():
@@ -8082,7 +8597,7 @@ def main():
             boot_animation()
         p_section("BXSW V4.0 - Social Media OSINT", "★")
         run_social_media(ctx, args)
-        report = {"tool": "BXSW V4.0", "mode": "social_media", "target": args.target, "timestamp": datetime.datetime.utcnow().isoformat()+"Z", "social_media": ctx.get("social_media"), "modules_run": ctx.get("modules_run")}
+        report = {"tool": "BXSW V4.0", "mode": "social_media", "target": args.target, "timestamp": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"), "social_media": ctx.get("social_media"), "modules_run": ctx.get("modules_run")}
         if args.output:
             with open(args.output,"w",encoding="utf-8") as f:
                 json.dump(report,f,ensure_ascii=False,indent=2)
