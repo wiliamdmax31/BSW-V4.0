@@ -67,7 +67,7 @@ python BXSW.py username --mode 3
 
 ## Note
 Usage uniquement pour tests autorisés. OSINT public uniquement.
-![BXSW V4.0](https://github.com/wiliamdmax31/BSW-V4.0/blob/main/BSW-X2.png?raw=true)
+![BXSW V4.0](https://i.pinimg.com/736x/33/d2/19/33d21967e18bc32258cb5f89ef65b03b.jpg)
 
 
 
